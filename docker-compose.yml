@@ -1,0 +1,121 @@
+services:
+  # 1) MariaDB (외부 팀 컨테이너도 붙을 대상)
+  db:
+    image: ${MARIADB_TAG}@${MARIADB_DIGEST}
+    container_name: job_crawler_db
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${DB_NAME}
+      MYSQL_USER: ${DB_USER}
+      MYSQL_PASSWORD: ${DB_PASSWORD}
+      TZ: ${TZ}
+    volumes:
+      - db_data:/var/lib/mysql
+    ports:
+      - "${DB_PUBLISHED_PORT:-3308}:3306"   # 호스트 3308 -> 컨테이너 3306
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      internal_net: {}
+      backend:
+        aliases: [db, mariadb]              # 외부 팀: host=mariadb, port=3306
+
+  # 2) Redis (내부용 브로커)
+  redis:
+    image: ${REDIS_TAG}@${REDIS_DIGEST}
+    container_name: job_crawler_redis
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      internal_net: {}
+
+  # 3) Django 앱 (API)
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        PYTHON_BASE_IMAGE: ${PYTHON_BASE_IMAGE}
+        PYTHON_BASE_DIGEST: ${PYTHON_BASE_DIGEST}
+    container_name: job_crawler_app
+    command: gunicorn config.wsgi:application --bind 0.0.0.0:8000
+    volumes:
+      - .:/app
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      internal_net: {}
+      backend:
+        aliases: [api]                       # 외부 팀: http://api:8000
+
+  # 4) Celery 워커
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        PYTHON_BASE_IMAGE: ${PYTHON_BASE_IMAGE}
+        PYTHON_BASE_DIGEST: ${PYTHON_BASE_DIGEST}
+    container_name: job_crawler_worker
+    command: celery -A config worker -l info
+    volumes:
+      - .:/app
+    env_file:
+      - .env
+    depends_on:
+      app:
+        condition: service_started
+      redis:
+        condition: service_healthy
+    networks:
+      internal_net: {}
+
+  # 5) Celery 비트
+  beat:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        PYTHON_BASE_IMAGE: ${PYTHON_BASE_IMAGE}
+        PYTHON_BASE_DIGEST: ${PYTHON_BASE_DIGEST}
+    container_name: job_crawler_beat
+    command: celery -A config beat -l info --scheduler django_celery_beat.schedulers:DatabaseScheduler
+    volumes:
+      - .:/app
+    env_file:
+      - .env
+    depends_on:
+      app:
+        condition: service_started
+      redis:
+        condition: service_healthy
+    networks:
+      internal_net: {}
+
+volumes:
+  db_data:
+
+networks:
+  # 우리 스택 내부 전용
+  internal_net:
+    internal: true
+  # 외부 팀과 공유할 네트워크 (이 이름으로 다른 팀이 external로 붙음)
+  backend:
+    external: true
+    name: backend_net
+    driver: bridge

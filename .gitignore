@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyd
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Django
+*.sqlite3
+media/
+staticfiles/
+logs/
+
+# Scrapy
+.scrapy/
+
+# IDE/Editor
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker
+db_data/
+*.log
+
+# Env (실제 비밀은 절대 올리지 않기)
+.env
+.env.*
+# 예시 파일만 허용하려면 (있다면) .env.example 는 트래킹
+!.env.example

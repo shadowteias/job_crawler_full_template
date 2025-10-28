@@ -1,0 +1,196 @@
+name: job_crawler_full_template
+services:
+  app:
+    build:
+      context: C:\Users\teias\Downloads\job_crawler_full_template
+      dockerfile: Dockerfile
+    command:
+      - gunicorn
+      - config.wsgi:application
+      - --bind
+      - 0.0.0.0:8000
+    container_name: job_crawler_app
+    depends_on:
+      db:
+        condition: service_healthy
+        required: true
+      redis:
+        condition: service_healthy
+        required: true
+    environment:
+      API_INTERNAL_TOKEN: internal_token_8h_7Kifc0r
+      CRAWL_INTERVAL_HOURS: "8"
+      DB_HOST: db
+      DB_NAME: job_data
+      DB_PASSWORD: uR7!fP9v@L3xA2qT#e6K
+      DB_PORT: "3306"
+      DB_PUBLISHED_PORT: "3308"
+      DB_ROOT_PASSWORD: R0ot!2025^maria#K8pS
+      DB_USER: user
+      DJANGO_ALLOWED_HOSTS: localhost,127.0.0.1,api
+      DJANGO_DEBUG: "True"
+      DJANGO_SECRET_KEY: g1yQ9!JtK@7pW3zX5n^Ar8F%L2uR0cVh6S#MdE4bBk!qUy*PZ
+      REDIS_URL: redis://redis:6379/0
+      TZ: Asia/Seoul
+    networks:
+      backend:
+        aliases:
+          - api
+      internal_net: {}
+    ports:
+      - mode: ingress
+        target: 8000
+        published: "8000"
+        protocol: tcp
+    volumes:
+      - type: bind
+        source: C:\Users\teias\Downloads\job_crawler_full_template
+        target: /app
+        bind:
+          create_host_path: true
+  beat:
+    build:
+      context: C:\Users\teias\Downloads\job_crawler_full_template
+      dockerfile: Dockerfile
+    command:
+      - celery
+      - -A
+      - config
+      - beat
+      - -l
+      - info
+      - --scheduler
+      - django_celery_beat.schedulers:DatabaseScheduler
+    container_name: job_crawler_beat
+    depends_on:
+      app:
+        condition: service_started
+        required: true
+      redis:
+        condition: service_healthy
+        required: true
+    environment:
+      API_INTERNAL_TOKEN: internal_token_8h_7Kifc0r
+      CRAWL_INTERVAL_HOURS: "8"
+      DB_HOST: db
+      DB_NAME: job_data
+      DB_PASSWORD: uR7!fP9v@L3xA2qT#e6K
+      DB_PORT: "3306"
+      DB_PUBLISHED_PORT: "3308"
+      DB_ROOT_PASSWORD: R0ot!2025^maria#K8pS
+      DB_USER: user
+      DJANGO_ALLOWED_HOSTS: localhost,127.0.0.1,api
+      DJANGO_DEBUG: "True"
+      DJANGO_SECRET_KEY: g1yQ9!JtK@7pW3zX5n^Ar8F%L2uR0cVh6S#MdE4bBk!qUy*PZ
+      REDIS_URL: redis://redis:6379/0
+      TZ: Asia/Seoul
+    networks:
+      internal_net: {}
+    volumes:
+      - type: bind
+        source: C:\Users\teias\Downloads\job_crawler_full_template
+        target: /app
+        bind:
+          create_host_path: true
+  db:
+    container_name: job_crawler_db
+    environment:
+      MYSQL_DATABASE: job_data
+      MYSQL_PASSWORD: uR7!fP9v@L3xA2qT#e6K
+      MYSQL_ROOT_PASSWORD: R0ot!2025^maria#K8pS
+      MYSQL_USER: user
+      TZ: Asia/Seoul
+    healthcheck:
+      test:
+        - CMD
+        - mysqladmin
+        - ping
+        - -h
+        - localhost
+      timeout: 5s
+      interval: 10s
+      retries: 5
+    image: mariadb:10.5
+    networks:
+      backend:
+        aliases:
+          - db
+          - mariadb
+      internal_net: {}
+    ports:
+      - mode: ingress
+        target: 3306
+        published: "3308"
+        protocol: tcp
+    restart: unless-stopped
+    volumes:
+      - type: volume
+        source: db_data
+        target: /var/lib/mysql
+        volume: {}
+  redis:
+    container_name: job_crawler_redis
+    healthcheck:
+      test:
+        - CMD
+        - redis-cli
+        - ping
+      timeout: 5s
+      interval: 10s
+      retries: 5
+    image: redis:6.2-alpine
+    networks:
+      internal_net: {}
+    restart: unless-stopped
+  worker:
+    build:
+      context: C:\Users\teias\Downloads\job_crawler_full_template
+      dockerfile: Dockerfile
+    command:
+      - celery
+      - -A
+      - config
+      - worker
+      - -l
+      - info
+    container_name: job_crawler_worker
+    depends_on:
+      app:
+        condition: service_started
+        required: true
+      redis:
+        condition: service_healthy
+        required: true
+    environment:
+      API_INTERNAL_TOKEN: internal_token_8h_7Kifc0r
+      CRAWL_INTERVAL_HOURS: "8"
+      DB_HOST: db
+      DB_NAME: job_data
+      DB_PASSWORD: uR7!fP9v@L3xA2qT#e6K
+      DB_PORT: "3306"
+      DB_PUBLISHED_PORT: "3308"
+      DB_ROOT_PASSWORD: R0ot!2025^maria#K8pS
+      DB_USER: user
+      DJANGO_ALLOWED_HOSTS: localhost,127.0.0.1,api
+      DJANGO_DEBUG: "True"
+      DJANGO_SECRET_KEY: g1yQ9!JtK@7pW3zX5n^Ar8F%L2uR0cVh6S#MdE4bBk!qUy*PZ
+      REDIS_URL: redis://redis:6379/0
+      TZ: Asia/Seoul
+    networks:
+      internal_net: {}
+    volumes:
+      - type: bind
+        source: C:\Users\teias\Downloads\job_crawler_full_template
+        target: /app
+        bind:
+          create_host_path: true
+networks:
+  backend:
+    name: backend_net
+    driver: bridge
+  internal_net:
+    name: job_crawler_full_template_internal_net
+    internal: true
+volumes:
+  db_data:
+    name: job_crawler_full_template_db_data

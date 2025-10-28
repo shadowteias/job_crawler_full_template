@@ -1,0 +1,36 @@
+# Git / VCS
+.git
+.github
+
+# Python
+__pycache__
+*.pyc
+.venv
+venv
+env
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.coverage
+htmlcov
+
+# Django artifacts & user data
+media
+staticfiles
+logs
+
+# Docker volumes (호스트 경로 사용 시)
+db_data
+
+# Scrapy
+.scrapy
+
+# Env (절대 이미지에 넣지 않기)
+.env
+.env.*
+
+# Editors/OS
+.vscode
+.idea
+.DS_Store
+Thumbs.db
