@@ -111,11 +111,11 @@ volumes:
   db_data:
 
 networks:
-  # 우리 스택 내부 전용
+  # 우리 스택 내부 전용 (이제 외부 인터넷도 가능)
   internal_net:
-    internal: true
-  # 외부 팀과 공유할 네트워크 (이 이름으로 다른 팀이 external로 붙음)
+    driver: bridge
+
+  # 외부 팀과 공유할 네트워크 (이미 backend_net를 만들어 두고 external로 붙여서 사용)
   backend:
     external: true
     name: backend_net
-    driver: bridge

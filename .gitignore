@@ -37,3 +37,4 @@ db_data/
 .env.*
 # 예시 파일만 허용하려면 (있다면) .env.example 는 트래킹
 !.env.example
+!.env.template
