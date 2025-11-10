@@ -29,30 +29,50 @@ def find_missing_homepages():
     return {"targets": total, "updated": updated}
 
 
+# @shared_task
+# def run_discover_careers_spiders():
+#     qs = Company.objects.filter(
+#         homepage_url__isnull=False,
+#         recruits_url__isnull=True,
+#     )
+#     total = qs.count()
+#     logger.info("discover_careers: start (targets=%s)", total)
+
+#     for company in qs:
+#         cmd = [
+#             "scrapy",
+#             "crawl",
+#             "discover_careers",
+#             "-a",
+#             f"company_name={company.name}",
+#             "-a",
+#             f"homepage_url={company.homepage_url}",
+#         ]
+#         subprocess.run(cmd, cwd=SCRAPY_PROJECT_PATH)
+
+#     logger.info("discover_careers: done")
+#     return {"targets": total}
+
 @shared_task
 def run_discover_careers_spiders():
-    qs = Company.objects.filter(
+    from .models import Company
+    from config.settings import BASE_DIR
+    import subprocess
+    import os
+
+    companies = Company.objects.filter(
         homepage_url__isnull=False,
         recruits_url__isnull=True,
     )
-    total = qs.count()
-    logger.info("discover_careers: start (targets=%s)", total)
 
-    for company in qs:
+    for c in companies:
+        scrapy_project_path = os.path.join(BASE_DIR, "crawler")
         cmd = [
-            "scrapy",
-            "crawl",
-            "discover_careers",
-            "-a",
-            f"company_name={company.name}",
-            "-a",
-            f"homepage_url={company.homepage_url}",
+            "scrapy", "crawl", "discover_careers",
+            "-a", f"company_id={c.id}",
+            "-a", f"homepage_url={c.homepage_url}",
         ]
-        subprocess.run(cmd, cwd=SCRAPY_PROJECT_PATH)
-
-    logger.info("discover_careers: done")
-    return {"targets": total}
-
+        subprocess.run(cmd, cwd=scrapy_project_path)
 
 @shared_task
 def run_job_collector_spiders():
