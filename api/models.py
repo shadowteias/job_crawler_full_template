@@ -5,14 +5,56 @@ from django.db import models
 class Company(models.Model):
     # Django는 관례적으로 클래스 이름을 단수형(Company)으로 사용합니다.
     # id 필드는 Django가 자동으로 생성하므로, 명시적으로 정의할 필요가 없습니다.
+
+    PAGE_TYPE_CHOICES = [
+        ("listing", "Listing (board-style jobs page)"),
+        ("one_page", "One-page jobs section"),
+        ("main", "Main page has jobs"),
+        ("external", "External job site"),
+    ]
+    POST_TYPE_CHOICES = [
+        ("text", "Text-based postings"),
+        ("image", "Image-based postings"),
+        ("external_link", "Links to external job site"),
+    ]
+
     name = models.CharField(unique=True, max_length=255, verbose_name="회사명")
     homepage_url = models.URLField(max_length=2083, blank=True, null=True, verbose_name="홈페이지 URL")
     recruits_url = models.URLField(max_length=2083, blank=True, null=True, verbose_name="채용 페이지 URL")
+    page_type = models.CharField(
+        max_length=20,
+        choices=PAGE_TYPE_CHOICES,
+        blank=True,
+        null=True,
+        help_text="채용페이지 타입",
+    )
+    post_type = models.CharField(
+        max_length=20,
+        choices=POST_TYPE_CHOICES,
+        blank=True,
+        null=True,
+        help_text="채용포스트 분류",
+    )
+    hiring = models.BooleanField(
+        default=False,
+        help_text="채용진행 여부",
+    )
     recruits_url_status = models.CharField(max_length=20, blank=True, null=True, verbose_name="채용 URL 상태")
     recruits_url_score = models.IntegerField(blank=True, null=True, verbose_name="채용 URL 신뢰도 점수")
     logo_url = models.URLField(max_length=2083, blank=True, null=True, verbose_name="회사 로고 URL")
     industry = models.CharField(max_length=100, blank=True, null=True, verbose_name="산업 분야")
     address = models.CharField(max_length=255, blank=True, null=True, verbose_name="회사 주소")
+    region = models.CharField(
+        max_length=255,
+        blank=True,
+        null=True,
+        help_text="회사 지역",
+    )
+    external_job_site = models.URLField(
+        blank=True,
+        null=True,
+        help_text="외부채용사이트 주소",
+    )
     # auto_now_add=True: 객체가 처음 생성될 때만 현재 시간 저장
     # auto_now=True: 객체가 저장될 때마다 현재 시간으로 업데이트
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="생성일")

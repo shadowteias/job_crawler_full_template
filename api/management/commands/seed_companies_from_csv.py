@@ -1,129 +1,134 @@
-# api/management/commands/seed_companies_from_csv.py
-
 import csv
 from pathlib import Path
 
-from django.core.management.base import BaseCommand
+from django.core.management.base import BaseCommand, CommandError
 from django.conf import settings
 
 from api.models import Company
 
 
+# 여러 인코딩을 시도해서 CSV 파일을 여는 유틸
 POSSIBLE_ENCODINGS = (
-    "utf-8-sig",  # UTF-8 with BOM (요즘 에디터/엑셀)
-    "cp949",      # 윈도우 한글 기본
-    "euc-kr",     # 예전 한글 인코딩
+    "utf-8-sig",  # UTF-8 with BOM (엑셀 등)
+    "cp949",      # 윈도우 한글
+    "euc-kr",     # 구형 한글
 )
 
 
 def open_csv_safely(csv_path: Path):
     """
-    여러 인코딩을 시도해서 CSV 파일을 연다.
-    모두 실패하면 utf-8(errors=ignore)로라도 연다.
+    여러 인코딩을 시도해서 CSV 파일을 연는다.
+    모두 실패하면 utf-8(errors=ignore)로 연다.
     """
     last_err = None
 
     for enc in POSSIBLE_ENCODINGS:
         try:
-            f = csv_path.open(encoding=enc)
-            # 한 줄 읽어보고 문제 없으면 그 인코딩 채택
+            f = csv_path.open(encoding=enc, newline="")
+            # 한 줄 읽어보고 문제 없으면 채택
             f.readline()
             f.seek(0)
             return f
         except UnicodeDecodeError as e:
             last_err = e
 
-    # 여기까지 오면 전부 실패한 것 → 최후 수단
-    # (문제 되는 글자는 날리고라도 진행)
-    f = csv_path.open(encoding="utf-8", errors="ignore")
+    # 최후 수단: 문제 되는 글자는 버리고 진행
+    f = csv_path.open(encoding="utf-8", errors="ignore", newline="")
     return f
 
 
 class Command(BaseCommand):
-    help = "Seed Company table from CSV (idempotent)."
+    help = (
+        "data/companies.csv 로 Company 테이블을 시딩/업데이트합니다.\n"
+        "- 컬럼: company_name, homepage_url, recruits_url, page_type, post_type, hiring, region\n"
+        "- 기존 레코드는 유지하고, CSV에 값이 있는 컬럼만 갱신합니다."
+    )
 
     def add_arguments(self, parser):
         parser.add_argument(
             "--path",
-            default="data/companies.csv",
-            help="CSV 경로 (프로젝트 BASE_DIR 기준)",
+            type=str,
+            help="CSV 파일 경로 (기본: BASE_DIR/data/companies.csv)",
         )
 
     def handle(self, *args, **options):
-        csv_path = Path(settings.BASE_DIR) / options["path"]
+        base_dir = Path(settings.BASE_DIR)
+        csv_path = Path(options["path"]) if options.get("path") else (base_dir / "data" / "companies.csv")
 
         if not csv_path.exists():
-            self.stderr.write(self.style.ERROR(f"CSV not found: {csv_path}"))
-            return
+            raise CommandError(f"CSV 파일을 찾을 수 없습니다: {csv_path}")
 
-        # 모델에 필드 있는지 확인 후, 있을 때만 세팅
-        has_has_answer = hasattr(Company, "has_answer")
-        has_answer_url = hasattr(Company, "answer_url")
-        has_recruits_status = hasattr(Company, "recruits_url_status")
+        self.stdout.write(self.style.NOTICE(f"CSV 로딩: {csv_path}"))
+
+        # 파일 열기 (인코딩 자동 판단)
+        f = open_csv_safely(csv_path)
 
         created = 0
         updated = 0
+        skipped = 0
 
-        with open_csv_safely(csv_path) as f:
+        with f:
             reader = csv.DictReader(f)
 
-            for row in reader:
-                # 회사 이름 컬럼: name / company_name / 회사명 등 다양성 고려 가능
-                name = (
-                    row.get("name")
-                    or row.get("company_name")
-                    or row.get("회사명")
-                    or ""
-                ).strip()
+            # 컬럼 체크 (정확한 이름만 사용)
+            required = ["company_name"]
+            for col in required:
+                if col not in (reader.fieldnames or []):
+                    raise CommandError(f"CSV에 필수 컬럼이 없습니다: {col}")
+
+            for idx, row in enumerate(reader, start=2):  # 2행부터 데이터
+                name = (row.get("company_name") or "").strip()
                 if not name:
+                    skipped += 1
+                    self.stdout.write(
+                        self.style.WARNING(f"[line {idx}] company_name 비어있음 -> 건너뜀")
+                    )
                     continue
 
-                homepage_url = (
-                    row.get("homepage_url")
-                    or row.get("homepage")
-                    or ""
-                ).strip() or None
-
-                recruits_url = (
-                    row.get("recruits_url")
-                    or row.get("recruits.url")
-                    or row.get("채용URL")
-                    or ""
-                ).strip() or None
-
-                has_answer_val = (row.get("has_answer") or "").strip().lower()
-                answer_url_val = (row.get("answer_url") or "").strip() or None
-
-                defaults = {}
-
-                # homepage_url 있으면 저장
-                if homepage_url:
-                    defaults["homepage_url"] = homepage_url
-
-                # recruits_url 있으면 저장 + 상태를 CONFIRMED로 (필드 있으면)
-                if recruits_url:
-                    defaults["recruits_url"] = recruits_url
-                    if has_recruits_status:
-                        defaults["recruits_url_status"] = "CONFIRMED"
-
-                # 정답 레이블 (있을 때만)
-                if has_has_answer and has_answer_val in ("1", "true", "y", "yes"):
-                    defaults["has_answer"] = True
-                if has_answer_url and answer_url_val:
-                    defaults["answer_url"] = answer_url_val
-
-                obj, is_created = Company.objects.update_or_create(
-                    name=name,
-                    defaults=defaults,
-                )
-
-                if is_created:
+                company, created_flag = Company.objects.get_or_create(name=name)
+                if created_flag:
                     created += 1
                 else:
                     updated += 1
 
+                # homepage_url
+                homepage = (row.get("homepage_url") or "").strip()
+                if homepage:
+                    company.homepage_url = homepage
+
+                # recruits_url
+                recruits = (row.get("recruits_url") or "").strip()
+                if recruits:
+                    company.recruits_url = recruits
+
+                # page_type (값이 있으면 그대로 사용)
+                page_type = (row.get("page_type") or "").strip()
+                if page_type:
+                    company.page_type = page_type
+
+                # post_type (값이 있으면 그대로 사용)
+                post_type = (row.get("post_type") or "").strip()
+                if post_type:
+                    company.post_type = post_type
+
+                # hiring (간단한 bool 파싱)
+                hiring_raw = (row.get("hiring") or "").strip().lower()
+                if hiring_raw:
+                    if hiring_raw in ("1", "y", "yes", "true", "t"):
+                        company.hiring = True
+                    elif hiring_raw in ("0", "n", "no", "false", "f"):
+                        company.hiring = False
+                    # 애매하면 그냥 건너뜀 (기존 값 유지)
+
+                # region
+                region = (row.get("region") or "").strip()
+                if region:
+                    company.region = region
+
+                company.save()
+
         self.stdout.write(
             self.style.SUCCESS(
-                f"Seed completed. created={created}, updated={updated}"
+                f"완료: created={created}, updated={updated}, skipped={skipped}"
             )
         )

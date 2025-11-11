@@ -33,7 +33,7 @@ def parse_job_details_with_llm(raw_text: str) -> dict:
     # This is where you would call the actual Generative AI API.
     # Example:
     # try:
-    #     genai.configure(api_key="YOUR_API_KEY")
+    #     genai.configure(api_key="YOUR_API_KEY") # API 키는 .env 등에서 관리
     #     model = genai.GenerativeModel('gemini-pro')
     #     response = model.generate_content([SYSTEM_PROMPT, raw_text])
     #     llm_output = response.text
@@ -55,5 +55,23 @@ def parse_job_details_with_llm(raw_text: str) -> dict:
       "hiring_process": "Document Screening > Coding Test > 1st Technical Interview > 2nd Executive Interview > Final Offer",
       "benefits": "Industry-leading salary, flexible work hours, unlimited vacation, high-end equipment support"
     }
-    
+    ```
+    """
+    # ------------------------------------
 
+    try:
+        # LLM의 응답에서 JSON 부분만 추출 (```json ... ``` 같은 마크다운 제거)
+        if '```json' in llm_output:
+            json_str = llm_output.split('```json')[1].split('```')[0].strip()
+        elif '```' in llm_output:
+             json_str = llm_output.split('```')[1].strip()
+        else:
+            json_str = llm_output.strip()
+            
+        parsed_data = json.loads(json_str)
+        print("--- LLM Parsing Successful ---")
+        return parsed_data
+    except (json.JSONDecodeError, IndexError) as e:
+        print(f"--- LLM Response Parsing Failed: {e} ---")
+        # 실패 시 빈 딕셔너리를 반환하여 다음 단계에서 오류가 나지 않도록 함
+        return {}
