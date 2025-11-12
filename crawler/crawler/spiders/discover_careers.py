@@ -458,278 +458,380 @@
 
 
 
-import re
-from urllib.parse import urljoin, urlparse
 
-import scrapy
-from scrapy import Request
 
-from api.models import Company
+import os
+import logging
+from urllib.parse import urlparse
 
+import django
+from django.db import connections
+from django.db.utils import OperationalError
+
+from scrapy import Spider, Request
+
+# ===== Django 초기화 =====
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings")
+# Scrapy(비동기 컨텍스트) 안에서 ORM 사용 허용
+os.environ.setdefault("DJANGO_ALLOW_ASYNC_UNSAFE", "true")
+
+django.setup()
+
+from api.models import Company  # noqa: E402
+
+logger = logging.getLogger(__name__)
 
 PRIORITY_KEYWORDS = [
     "채용공고","채용 안내","채용안내","채용 정보","채용정보","채용",
     "인재채용","인재 모집","recruit","recruitment","career",
     "careers","jobs","employment","join us",
     '입사지원','채용사이트가기','채용중인공고','채용사이트',
-    '채용절차','openpositions','집중채용', 
+    '채용절차','openpositions','집중채용', '채용공고 확인하기'
 ]
 
 EXTERNAL_JOB_DOMAINS = [
+    "wanted.co.kr",
     "saramin.co.kr",
     "jobkorea.co.kr",
-    "wanted.co.kr",
 ]
 
-MAX_DEPTH = 3  # 너무 깊이 안 들어가도록 제한
 
-
-class DiscoverCareersSpider(scrapy.Spider):
+class DiscoverCareersSpider(Spider):
     name = "discover_careers"
 
     custom_settings = {
         "LOG_LEVEL": "INFO",
-        # 이 스파이더는 회사 1개 기준이므로 동시 요청 수 높일 필요 없음
-        "CONCURRENT_REQUESTS": 4,
         "DOWNLOAD_DELAY": 0.3,
-        "ROBOTSTXT_OBEY": False,
+        "CONCURRENT_REQUESTS": 4,
     }
 
     def __init__(self, company_id=None, company_name=None, homepage_url=None, *args, **kwargs):
         super().__init__(*args, **kwargs)
-
         if not company_id or not homepage_url:
-            raise ValueError("company_id와 homepage_url 인자가 필요합니다.")
+            raise ValueError("company_id and homepage_url are required")
 
         self.company_id = int(company_id)
         self.company_name = company_name or ""
-        self.start_urls = [homepage_url]
+        self.start_url = homepage_url
 
-        self.start_domain = urlparse(homepage_url).netloc
+        parsed = urlparse(homepage_url)
+        self.start_domain = parsed.netloc
+
+        self.max_depth = 3
         self.visited = set()
-        self.found = False
 
-    # 공통 시작 포인트
+    # Scrapy 2.13 경고 회피 위해 start_requests 유지 (하위호환),
+    # 필요시 start() 도입 가능.
     def start_requests(self):
-        for url in self.start_urls:
-            yield Request(url, callback=self.parse_page, meta={"depth": 0})
+        yield Request(
+            url=self.start_url,
+            callback=self.parse_page,
+            meta={"depth": 0},
+            dont_filter=True,
+        )
 
-    # 메인 파서: 모든 페이지는 여기(or parse_candidate)를 거친다
+    # ===== 핵심 로직 =====
+
     def parse_page(self, response):
-        if self.found:
-            return
-
         depth = response.meta.get("depth", 0)
         url = response.url
+        self.visited.add(url)
 
-        self.logger.info("[discover] depth=%s url=%s", depth, url)
+        logger.info("[discover] depth=%s url=%s", depth, url)
 
-        # 1) 외부 구인 사이트 직접 연결?
-        if self.is_external_jobboard(url):
+        # depth=0(홈페이지)에서는,
+        # '채용' 등 명시적인 링크가 있으면 최우선으로 한 번 따라가 본다.
+        if depth == 0:
+            direct = self.find_direct_recruit_link(response)
+            if direct and direct not in self.visited:
+                logger.info("[discover] depth=0 direct recruit link -> %s", direct)
+                self.visited.add(direct)
+                yield Request(
+                    url=direct,
+                    callback=self.parse_page,
+                    meta={"depth": depth + 1},
+                    dont_filter=True,
+                )
+                return
+
+
+        # 1) 외부 채용 플랫폼 링크가 이 페이지 안에 하나라도 있으면:
+        #    - 이 페이지를 외부 채용 연동 페이지로 인정하고 종료
+        if self.contains_external_job_link(response):
             self.save_result(
-                recruits_url=url,
+                page_url=url,
                 page_type="external",
                 post_type="external_link",
             )
             return
 
-        # 2) 현재 페이지가 채용 메인 페이지처럼 보이는지 판단
-        if self.looks_like_listing(response):
-            post_type = self.detect_post_type(response)
+        text = self._get_text(response)
+
+        # 2) listing 형태 추정
+        if self.looks_like_listing(response, text):
             self.save_result(
-                recruits_url=url,
+                page_url=url,
                 page_type="listing",
-                post_type=post_type,
+                post_type="text",
             )
             return
 
-        if self.looks_like_onepage(response):
-            post_type = self.detect_post_type(response)
-            # 시작 URL이면 메인에서 채용 안내하는 케이스로 간주 가능
+        # 3) one_page / main 형태 추정
+        if self.looks_like_onepage(response, text, depth):
             page_type = "main" if depth == 0 else "one_page"
             self.save_result(
-                recruits_url=url,
+                page_url=url,
                 page_type=page_type,
-                post_type=post_type,
+                post_type="text",
             )
             return
 
-        # 3) 아직 못 찾았고, 탐색 가능하면 다음 후보 링크들 선택
-        if depth >= MAX_DEPTH:
+        # 4) 더 이상 내려가지 않음
+        if depth >= self.max_depth:
             return
 
+        # 5) 우선순위 키워드 기반 후보 링크 탐색 (URL 가중치 제외)
         for next_url in self.select_candidate_links(response):
-            if self.found:
-                break
             if next_url in self.visited:
                 continue
-            self.visited.add(next_url)
+            # 동일 회사 도메인만 탐색 (외부 채용 도메인은 위에서 이미 처리)
+            if not self.is_same_domain(next_url):
+                continue
             yield Request(
-                next_url,
+                url=next_url,
                 callback=self.parse_page,
                 meta={"depth": depth + 1},
                 dont_filter=True,
             )
 
-    # -------------------------------
-    # 선택 엔진: 우선순위 높은 링크 고르기
-    # -------------------------------
+    # ===== 선택 엔진 =====
+
     def select_candidate_links(self, response):
+        """
+        PRIORITY_KEYWORDS 가 텍스트/레이블에 포함된 링크만 후보로 사용.
+        URL path 기반 가중치는 사용하지 않는다 (요청사항).
+        """
         candidates = []
 
-        for a in response.css("a[href]"):
-            href = (a.attrib.get("href") or "").strip()
-            if not href or href.startswith("#") or href.lower().startswith("javascript:"):
+        for link in response.css("a"):
+            href = (link.attrib.get("href") or "").strip()
+            if not href:
                 continue
 
-            abs_url = urljoin(response.url, href)
-            parsed = urlparse(abs_url)
-
-            # 너무 엉뚱한 도메인으로 튀는 건 우선 제외 (외부 구인 사이트는 별도 처리)
-            if (
-                parsed.netloc
-                and parsed.netloc != self.start_domain
-                and not self.is_external_jobboard(abs_url)
-            ):
-                continue
-
-            text_parts = [
-                (a.attrib.get("title") or ""),
-                (a.attrib.get("aria-label") or ""),
-                "".join(a.css("::text").getall()),
+            text = " ".join(link.css("::text").getall()).strip()
+            label_parts = [
+                link.attrib.get("title"),
+                link.attrib.get("aria-label"),
             ]
-            link_text = " ".join(t.strip() for t in text_parts if t).lower()
+            label = " ".join(filter(None, label_parts)).strip()
 
-            score = 0
-
-            # 키워드 매칭 점수
-            for kw in PRIORITY_KEYWORDS:
-                if kw.lower() in link_text:
-                    score += 10
-            # URL path 상의 키워드도 가산점
-            path_lower = parsed.path.lower()
-            for kw in ["career", "careers", "recruit", "recruitment", "join", "hire"]:
-                if kw in path_lower:
-                    score += 6
-
-            # 외부 구인 서비스는 즉시 최우선
-            if self.is_external_jobboard(abs_url):
-                score += 100
-
-            if score > 0:
-                candidates.append((score, abs_url))
-
-        # 점수 내림차순 정렬
-        candidates.sort(key=lambda x: x[0], reverse=True)
-        result = [url for score, url in candidates]
-
-        if result:
-            self.logger.info(
-                "[discover] %s candidates from %s",
-                len(result),
-                response.url,
-            )
-
-        return result
-
-    # -------------------------------
-    # 판단 엔진: 이 페이지가 채용 페이지인가?
-    # -------------------------------
-    def looks_like_listing(self, response):
-        """
-        여러 개의 공고 링크/카드가 나열된 전형적인 '채용 리스트' 페이지인지.
-        """
-        body_text = " ".join(response.css("body *::text").getall()).lower()
-
-        if "채용" not in body_text and "recruit" not in body_text and "career" not in body_text:
-            return False
-
-        # 공고 리스트로 보이는 링크/블록 개수
-        job_like_links = 0
-        for a in response.css("a[href]"):
-            txt = "".join(a.css("::text").getall()).strip()
-            if not txt:
+            score = self.score_link_text(text, label)
+            if score <= 0:
                 continue
-            low = txt.lower()
-            if any(
-                kw in low
-                for kw in ["채용", "모집", "공고", "지원", "입사지원", "apply", "position", "recruit"]
-            ):
-                job_like_links += 1
 
-        # 대충 3개 이상 비슷한 링크 있으면 listing 가능성 높다고 본다
-        return job_like_links >= 3
+            full_url = response.urljoin(href)
+            if full_url in self.visited:
+                continue
 
-    def looks_like_onepage(self, response):
+            candidates.append((score, full_url))
+
+        # 텍스트 기반 점수 내림차순 정렬
+        candidates.sort(key=lambda x: x[0], reverse=True)
+        return [u for _, u in candidates]
+
+    def score_link_text(self, text, label):
+        text = (text or "").lower()
+        label = (label or "").lower()
+        combined = f"{text} {label}"
+        score = 0
+        for kw in PRIORITY_KEYWORDS:
+            if kw.lower() in combined:
+                score += 10
+        return score
+
+    # ===== 판단 엔진 =====
+
+    def contains_external_job_link(self, response):
         """
-        한 페이지 안에 회사 소개 + 복수의 포지션/조건이 텍스트로 잔뜩 있는 형식 등.
+        wanted/saramin/jobkorea 등으로 향하는 링크가 하나라도 있으면 True.
+        그 경우: '탐색 대상 아님' → 현재 페이지를 외부 연동 채용 페이지로 간주.
         """
-        body_text = " ".join(response.css("body *::text").getall()).lower()
-
-        if "채용" not in body_text and "recruit" not in body_text and "career" not in body_text:
-            return False
-
-        # 지원 관련 키워드 존재
-        if any(
-            kw in body_text
-            for kw in ["지원방법", "전형절차", "제출서류", "채용절차", "근무조건", "모집분야", "접수방법"]
-        ):
-            return True
-
+        for href in response.css("a::attr(href)").getall():
+            href = (href or "").strip()
+            if not href:
+                continue
+            lower = href.lower()
+            if any(domain in lower for domain in EXTERNAL_JOB_DOMAINS):
+                return True
         return False
 
-    def detect_post_type(self, response):
+    def looks_like_listing(self, response, text, depth):
         """
-        text vs image vs external_link 간 대략적 구분.
-        - external_link: 외부 구인 사이트를 가리키는 경우
-        - image: 텍스트는 거의 없고 이미지 위주인 경우 (대충 heuristic)
-        - text: 기본값
+        게시판형 목록 판단 로직 (오판 줄이기 버전)
+        - 전제: '채용/커리어' 등 키워드가 페이지에 있어야 함
+        - 핵심: 채용 관련 텍스트를 가진 링크가 '여러 개' 반복되어야 listing으로 인정
+        - depth=0(홈페이지)에서는 더 강한 조건을 요구 (네비게이션 오판 방지)
         """
-        url = response.url.lower()
-        if self.is_external_jobboard(url):
-            return "external_link"
+        t = (text or "").lower()
+        if not any(k in t for k in ["채용", "recruit", "career", "jobs", "job", "employment"]):
+            return False
 
-        body_text = " ".join(response.css("body *::text").getall()).strip()
-        img_count = len(response.css("img"))
+        from collections import Counter
 
-        # 텍스트 거의 없고 이미지만 많은 경우 → image 기반 공고로 추정
-        if img_count >= 3 and len(body_text) < 400:
-            return "image"
+        job_links = []
 
-        return "text"
+        for a in response.css("a"):
+            href = (a.attrib.get("href") or "").strip()
+            if not href:
+                continue
 
-    def is_external_jobboard(self, url: str) -> bool:
-        host = urlparse(url).netloc.lower()
-        return any(domain in host for domain in EXTERNAL_JOB_DOMAINS)
+            link_text = " ".join(a.css("::text").getall()).strip().lower()
+            label = " ".join(filter(None, [
+                a.attrib.get("title"),
+                a.attrib.get("aria-label"),
+            ])).strip().lower()
 
-    # -------------------------------
-    # 결과 저장
-    # -------------------------------
-    def save_result(self, recruits_url, page_type, post_type):
-        if self.found:
-            return
-        self.found = True
+            combined = f"{link_text} {label}"
 
-        # region, hiring 은 여기서 과하게 추론하지 말고,
-        # job_collector 단계에서/혹은 별도 로직에서 정교하게 처리하는 걸로 둔다.
+            # PRIORITY_KEYWORDS 중 하나라도 포함된 링크만 "채용 관련 링크"로 본다
+            if any(kw.lower() in combined for kw in PRIORITY_KEYWORDS):
+                full = urlparse(response.urljoin(href))
+                # 쿼리/fragment 제거한 상위 path 기준으로 패턴 묶기
+                norm_path = full.path.rsplit("/", 2)[0]
+                job_links.append(norm_path)
+
+        if not job_links:
+            return False
+
+        counts = Counter(job_links)
+        max_count = counts.most_common(1)[0][1]
+
+        # 홈페이지(depth=0)는 네비게이션 때문에 중복 path가 쉽게 생기므로
+        # 더 엄격하게: 채용 관련 링크 path가 최소 5개 이상일 때만 listing 인정
+        if depth == 0:
+            return max_count >= 5
+
+        # 그 외(depth>=1)는 3개 이상이면 listing으로 인정
+        return max_count >= 3
+
+
+    def looks_like_onepage(self, response, text, depth):
+        """
+        단일 공고/안내 페이지:
+        - 채용 관련 키워드 + 회사 소개/지원 안내 문구.
+        """
+        t = (text or "").lower()
+        if not any(k in t for k in ["채용", "recruit", "career", "입사지원", "지원방법"]):
+            return False
+        # depth 0 이면 main 으로 처리, 그 외는 one_page
+        return True
+
+    # ===== 헬퍼 =====
+
+    def save_result(self, page_url, page_type, post_type):
+        """
+        Company 레코드에 채용 페이지 정보 저장.
+        Scrapy 비동기 컨텍스트에서 호출되므로,
+        DJANGO_ALLOW_ASYNC_UNSAFE=true 전제 하에 동작.
+        """
         try:
-            Company.objects.filter(id=self.company_id).update(
-                recruits_url=recruits_url,
-                recruits_url_status="CONFIRMED",
+            # DB 연결 확인 (유실된 커넥션 대비)
+            for conn in connections.all():
+                try:
+                    conn.ensure_connection()
+                except OperationalError:
+                    conn.close()
+
+            updated = Company.objects.filter(id=self.company_id).update(
+                recruits_url=page_url,
                 page_type=page_type,
                 post_type=post_type,
             )
-            self.logger.info(
-                "[discover] SAVED company_id=%s url=%s page_type=%s post_type=%s",
-                self.company_id,
-                recruits_url,
-                page_type,
-                post_type,
-            )
+            if updated:
+                logger.info(
+                    "[discover] SAVED company_id=%s url=%s page_type=%s post_type=%s",
+                    self.company_id,
+                    page_url,
+                    page_type,
+                    post_type,
+                )
+            else:
+                logger.warning(
+                    "[discover] FAILED TO UPDATE company_id=%s (no rows)",
+                    self.company_id,
+                )
         except Exception as e:
-            self.logger.error(
+            logger.error(
                 "[discover] FAILED TO SAVE company_id=%s url=%s: %s",
                 self.company_id,
-                recruits_url,
+                page_url,
                 e,
             )
+
+    def _get_text(self, response):
+        return " ".join(response.css("body ::text").getall())
+
+    def is_same_domain(self, url: str) -> bool:
+        """
+        시작 도메인과 같은 회사 도메인인지 판정.
+        - 정확히 같은 도메인 허용
+        - 같은 최상위 도메인(eTLD+1)에 속한 서브도메인 허용
+          (예: www.class101.net, jobs.class101.net, class101.net 모두 OK)
+        """
+        target = urlparse(url).netloc.split(":")[0]
+        origin = self.start_domain.split(":")[0]
+
+        if not target or not origin:
+            return False
+
+        if target == origin:
+            return True
+
+        origin_parts = origin.split(".")
+        target_parts = target.split(".")
+
+        if len(origin_parts) >= 2 and len(target_parts) >= 2:
+            origin_base = ".".join(origin_parts[-2:])  # class101.net
+            target_base = ".".join(target_parts[-2:])
+
+            # 같은 base 도메인이면 같은 회사로 간주 (subdomain 허용)
+            if origin_base == target_base:
+                return True
+
+        return False
+
+    def find_direct_recruit_link(self, response):
+        """
+        depth=0 전용:
+        메인 페이지에서 '채용' 계열 텍스트를 가진 a 태그를 찾아,
+        같은 회사 도메인의 링크가 있으면 그 URL을 반환.
+        (wanted/saramin/jobkorea 등 외부 플랫폼은 여기서 제외)
+        """
+        for a in response.css("a"):
+            href = (a.attrib.get("href") or "").strip()
+            if not href:
+                continue
+
+            text = " ".join(a.css("::text").getall()).strip().lower()
+            label = " ".join(filter(None, [
+                a.attrib.get("title"),
+                a.attrib.get("aria-label"),
+            ])).strip().lower()
+            combined = f"{text} {label}"
+
+            # 채용 관련 명시적 텍스트가 있을 때만
+            if not any(kw.lower() in combined for kw in PRIORITY_KEYWORDS):
+                continue
+
+            full_url = response.urljoin(href)
+            lower = full_url.lower()
+
+            # 외부 채용 플랫폼(정책상 여기선 제외)
+            if any(domain in lower for domain in EXTERNAL_JOB_DOMAINS):
+                continue
+
+            # 같은 회사 도메인(서브도메인 포함)만 허용
+            if self.is_same_domain(full_url):
+                return full_url
+
+        return None

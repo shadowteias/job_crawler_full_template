@@ -70,3 +70,8 @@ w3lib==2.3.1
 wcwidth==0.2.14
 whitenoise==6.11.0
 zope.interface==8.0.1
+transformers==4.44.2
+torch==2.9.0
+accelerate==1.11.0
+sentencepiece==0.2.1
+protobuf==6.33.0

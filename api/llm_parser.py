@@ -1,77 +1,74 @@
-import json
-# import google.generativeai as genai # 실제 API 사용 시 주석 해제
+# api/llm_parser.py
 
-# --------------------------------------------------------------------------
-# ★ LLM 프롬프트 엔지니어링 영역 ★
-# --------------------------------------------------------------------------
-# LLM의 역할과 출력 형식을 명확하게 지시하는 것이 핵심입니다.
-SYSTEM_PROMPT = """
-You are an expert HR professional specializing in analyzing IT job postings.
-Analyze the given job posting text and extract the key information for each item in the JSON format below.
+import os
+from functools import lru_cache
 
-Rules:
-- If there is no content for an item, use an empty string ("") as the value.
-- The result must be a valid JSON format. Return only the JSON object without any other explanations.
-- For 'qualifications' and 'preferred_qualifications', maintain the bullet point style as much as possible, separating lines with a newline character (\\n).
+from transformers import AutoTokenizer, AutoModelForSequenceClassification, pipeline
 
-{
-  "job_description": "string",
-  "qualifications": "string",
-  "preferred_qualifications": "string",
-  "hiring_process": "string",
-  "benefits": "string"
-}
-"""
+# 한국어 지원되는 NLI/분류용 모델 (로컬에 다운로드됨)
+# 필요하면 환경 변수로 바꿀 수 있게 해둠.
+JOB_CLASSIFIER_MODEL = os.getenv(
+    "JOB_CLASSIFIER_MODEL",
+    "joeddav/xlm-roberta-large-xnli"  # 한국어 포함 멀티링구얼 NLI
+)
 
-def parse_job_details_with_llm(raw_text: str) -> dict:
+@lru_cache()
+def _get_zero_shot_classifier():
+    tokenizer = AutoTokenizer.from_pretrained(JOB_CLASSIFIER_MODEL)
+    model = AutoModelForSequenceClassification.from_pretrained(JOB_CLASSIFIER_MODEL)
+    clf = pipeline(
+        "zero-shot-classification",
+        model=model,
+        tokenizer=tokenizer,
+        device=-1,  # CPU, GPU 쓰면 0으로 설정
+    )
+    return clf
+
+
+def is_job_posting(text: str, threshold: float = 0.65) -> bool:
     """
-    Uses an LLM to extract structured data from a job posting text.
+    주어진 텍스트가 '채용공고'일 확률이 충분히 높은지 판단.
+    GPU 없으면 조금 느릴 수 있지만, 후보 페이지만 넣으므로 감당 가능한 수준.
     """
-    print("--- Calling LLM Parser ---")
-    
-    # --- [For Actual Implementation] ---
-    # This is where you would call the actual Generative AI API.
-    # Example:
-    # try:
-    #     genai.configure(api_key="YOUR_API_KEY") # API 키는 .env 등에서 관리
-    #     model = genai.GenerativeModel('gemini-pro')
-    #     response = model.generate_content([SYSTEM_PROMPT, raw_text])
-    #     llm_output = response.text
-    # except Exception as e:
-    #     print(f"LLM API call failed: {e}")
-    #     return {}
-    # ----------------------------------
+    if not text:
+        return False
 
-    # --- [For Testing with Mock Data] ---
-    # This section generates a fake response for testing without calling the actual API.
-    # This should be replaced with the actual API call code above.
-    print("Using Mock LLM Data for testing...")
-    llm_output = """
-    ```json
+    snippet = text[:2000]  # 너무 길면 자르고
+    clf = _get_zero_shot_classifier()
+
+    labels = ["채용공고", "채용공고 아님"]
+    result = clf(
+        snippet,
+        candidate_labels=labels,
+        hypothesis_template="이 문서는 {}이다.",
+    )
+
+    top_label = result["labels"][0]
+    top_score = float(result["scores"][0])
+
+    # 디버깅 원하면 로그
+    # print(top_label, top_score)
+
+    return (top_label == "채용공고") and (top_score >= threshold)
+
+
+def parse_job_details_with_llm(text: str, url: str = "", company_name: str = "") -> dict:
+    """
+    선택: 상세 필드 추출용 LLM.
+    지금은 placeholder로 두고, 나중에 온프레 LLM/파인튜닝 모델 붙일 때 구현.
+
+    반환 형식 예:
     {
-      "job_description": "- Development and operation of the recruitment platform backend system\\n- Design and implementation of new service APIs",
-      "qualifications": "- 3+ years of experience with Python, Django/Flask frameworks\\n- Experience with RDBMS (MySQL, MariaDB, etc.)\\n- Experience with Git-based collaboration",
-      "preferred_qualifications": "- Experience developing high-traffic services\\n- Experience in a MSA environment\\n- Experience with Docker, Kubernetes",
-      "hiring_process": "Document Screening > Coding Test > 1st Technical Interview > 2nd Executive Interview > Final Offer",
-      "benefits": "Industry-leading salary, flexible work hours, unlimited vacation, high-end equipment support"
+        "job_description": "...",
+        "qualifications": "...",
+        "preferred_qualifications": "...",
+        "hiring_process": "...",
+        "benefits": "...",
+        "employment_type": "...",
+        "salary": "...",
+        "location": "...",
     }
-    ```
     """
-    # ------------------------------------
-
-    try:
-        # LLM의 응답에서 JSON 부분만 추출 (```json ... ``` 같은 마크다운 제거)
-        if '```json' in llm_output:
-            json_str = llm_output.split('```json')[1].split('```')[0].strip()
-        elif '```' in llm_output:
-             json_str = llm_output.split('```')[1].strip()
-        else:
-            json_str = llm_output.strip()
-            
-        parsed_data = json.loads(json_str)
-        print("--- LLM Parsing Successful ---")
-        return parsed_data
-    except (json.JSONDecodeError, IndexError) as e:
-        print(f"--- LLM Response Parsing Failed: {e} ---")
-        # 실패 시 빈 딕셔너리를 반환하여 다음 단계에서 오류가 나지 않도록 함
-        return {}
+    # 현재는 규칙 기반 파서가 있기 때문에 여기서는 빈 dict 반환
+    # 추후 필요 시 구현
+    return {}

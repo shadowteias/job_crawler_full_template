@@ -101,3 +101,144 @@ class JobPosting(models.Model):
         verbose_name = "채용 공고"
         verbose_name_plural = "채용 공고 목록"
 
+
+class Trainee(models.Model):
+    GENDER_CHOICES = [
+        ("M", "남"),
+        ("F", "여"),
+        ("O", "기타"),
+    ]
+
+    # 기본 인적 사항
+    counseling_date = models.DateField(verbose_name="날짜")
+    student_code = models.CharField(max_length=50, verbose_name="학생ID")
+    name_alias = models.CharField(max_length=50, verbose_name="이름(가명)")
+    birth_date = models.DateField(verbose_name="생년월일", null=True, blank=True)
+    gender = models.CharField(
+        max_length=1,
+        choices=GENDER_CHOICES,
+        verbose_name="성별",
+        blank=True,
+    )
+    education_level = models.CharField(
+        max_length=100,
+        verbose_name="학력",
+        blank=True,
+    )
+    major = models.CharField(
+        max_length=100,
+        verbose_name="전공",
+        blank=True,
+    )
+
+    # 학원 성적 / 경력
+    academy_rank = models.IntegerField(
+        verbose_name="학원 성적(등수)",
+        null=True,
+        blank=True,
+    )
+    career_summary = models.TextField(
+        verbose_name="경력",
+        blank=True,
+    )
+    career_months = models.PositiveIntegerField(
+        verbose_name="경력기간(M)",
+        null=True,
+        blank=True,
+    )
+
+    # 과정 및 상담 정보
+    course_name = models.CharField(
+        max_length=200,
+        verbose_name="과정명",
+        blank=True,
+    )
+    counseling_summary = models.TextField(
+        verbose_name="상담내용 요약",
+        blank=True,
+    )
+    counselor_name = models.CharField(
+        max_length=50,
+        verbose_name="상담교사",
+        blank=True,
+    )
+    note = models.TextField(
+        verbose_name="비고(위험/특이사항)",
+        blank=True,
+    )
+
+    # === 학생의 희망 조건 (매칭용 핵심) ===
+
+    # 희망 근무 인원(회사 규모)
+    preferred_company_size = models.PositiveIntegerField(
+        verbose_name="근무인원",
+        null=True,
+        blank=True,
+        help_text="학생이 희망하는 최소 근무 인원(예: 5, 10, 20, 50 등)",
+    )
+
+    # 희망 업종
+    preferred_industry = models.CharField(
+        max_length=100,
+        verbose_name="업종분류",
+        blank=True,
+    )
+
+    # 희망 구인 구분 (신입/경력 등)
+    preferred_employment_type = models.CharField(
+        max_length=50,
+        verbose_name="구인구분(신입,경력)",
+        blank=True,
+    )
+
+    # 희망 직무/기술 방향
+    preferred_job_skill = models.CharField(
+        max_length=255,
+        verbose_name="구인기술",
+        blank=True,
+    )
+
+    # 희망 근무지
+    preferred_location = models.CharField(
+        max_length=100,
+        verbose_name="근무지",
+        blank=True,
+    )
+
+    # 희망 급여 수준 (문자열로 저장, 나중에 파싱 가능)
+    preferred_salary = models.CharField(
+        max_length=100,
+        verbose_name="급여",
+        blank=True,
+    )
+
+    # 보유 기술 스택
+    tech_stack = models.CharField(
+        max_length=255,
+        verbose_name="기술스택",
+        blank=True,
+    )
+
+    # 희망 복리후생: 정해진 키워드만 콤마 구분 저장
+    welfare_preferences = models.CharField(
+        max_length=255,
+        verbose_name="복리후생",
+        blank=True,
+        help_text="식대, 재택근무, 건강검진, 교육비, 사내스터디, 컨퍼런스참가비, 운동비, 도서구입비, 경조사비, 경조휴가, 스톡옵션, 자율출퇴근제 중 선택",
+    )
+
+    # 필수조건: 학생이 '이 조건 안 지키면 지원 안함'으로 체크한 항목들
+    # (예: 근무인원>=50, 특정 복리후생 포함, 지역 제한 등)
+    required_conditions = models.CharField(
+        max_length=500,
+        verbose_name="필수조건",
+        blank=True,
+        help_text="사전에 정의된 조건 키만 콤마로 저장 (예: COMPANY_SIZE_10UP,BENEFIT_재택근무 등)",
+    )
+
+    class Meta:
+        verbose_name = "훈련생"
+        verbose_name_plural = "훈련생"
+
+    def __str__(self):
+        return f"{self.student_code} / {self.name_alias}"
