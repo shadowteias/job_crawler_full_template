@@ -91,6 +91,8 @@ class JobPosting(models.Model):
     status = models.CharField(max_length=20, verbose_name="공고 상태")
     crawled_at = models.DateTimeField(auto_now=True, verbose_name="수집일")
 
+    first_seen_at = models.DateTimeField(auto_now_add=True, verbose_name="최초수집일")
+    is_active = models.BooleanField(default=True, verbose_name="활성 공고")
 
     def __str__(self):
         return f"[{self.company.name}] {self.title}"
