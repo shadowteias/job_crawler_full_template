@@ -1,11 +1,9 @@
 from django.db import models
+from datetime import datetime
 
 # inspectdb로 자동 생성된 모델을 Django 관례에 맞게 수정한 최종 버전입니다.
 
 class Company(models.Model):
-    # Django는 관례적으로 클래스 이름을 단수형(Company)으로 사용합니다.
-    # id 필드는 Django가 자동으로 생성하므로, 명시적으로 정의할 필요가 없습니다.
-
     PAGE_TYPE_CHOICES = [
         ("listing", "Listing (board-style jobs page)"),
         ("one_page", "One-page jobs section"),
@@ -20,55 +18,73 @@ class Company(models.Model):
 
     name = models.CharField(unique=True, max_length=255, verbose_name="회사명")
     homepage_url = models.URLField(max_length=2083, blank=True, null=True, verbose_name="홈페이지 URL")
+    
+    # --- dedup / source metadata ---
+    name_norm = models.CharField(max_length=255, blank=True, null=True, db_index=True, verbose_name="회사명 정규화 키")
+    homepage_host = models.CharField(max_length=255, blank=True, null=True, db_index=True, verbose_name="홈페이지 호스트")
+    source_meta = models.JSONField(blank=True, null=True, verbose_name="소스별 부가정보(JSON)")
+
+    # --- homepage liveness ---
+    homepage_url_status = models.CharField(max_length=20, blank=True, null=True, db_index=True, verbose_name="홈페이지 상태")
+    homepage_checked_at = models.DateTimeField(blank=True, null=True, verbose_name="홈페이지 확인일시")
+    homepage_last_status_code = models.IntegerField(blank=True, null=True, verbose_name="홈페이지 마지막 HTTP 코드")
+    homepage_fail_count = models.IntegerField(default=0, verbose_name="홈페이지 연속 실패 횟수")
+
+    # --- DART enrichment ---
+    ceo_name = models.CharField(max_length=150, blank=True, null=True, verbose_name="대표자명")
+    bizr_no = models.CharField(max_length=20, blank=True, null=True, db_index=True, verbose_name="사업자등록번호")
+    stock_code = models.CharField(max_length=6, blank=True, null=True, db_index=True, verbose_name="종목코드(상장)")
+    dart_corp_code = models.CharField(max_length=8, blank=True, null=True, db_index=True, verbose_name="DART 고유번호")
+    dart_modify_date = models.CharField(max_length=8, blank=True, null=True, verbose_name="DART 최종변경일(YYYYMMDD)")
+    est_dt = models.DateField(blank=True, null=True, verbose_name="설립일")
+    acc_mt = models.CharField(max_length=2, blank=True, null=True, verbose_name="결산월(MM)")
+
+    # --- SWDB ---
+    swdb_fin_year = models.IntegerField(blank=True, null=True, verbose_name="SWDB 재무현황연도")
+
+
     recruits_url = models.URLField(max_length=2083, blank=True, null=True, verbose_name="채용 페이지 URL")
-    page_type = models.CharField(
-        max_length=20,
-        choices=PAGE_TYPE_CHOICES,
-        blank=True,
-        null=True,
-        help_text="채용페이지 타입",
-    )
-    post_type = models.CharField(
-        max_length=20,
-        choices=POST_TYPE_CHOICES,
-        blank=True,
-        null=True,
-        help_text="채용포스트 분류",
-    )
-    hiring = models.BooleanField(
-        default=False,
-        help_text="채용진행 여부",
-    )
+
+    page_type = models.CharField(max_length=20, choices=PAGE_TYPE_CHOICES, blank=True, null=True, help_text="채용페이지 타입")
+    post_type = models.CharField(max_length=20, choices=POST_TYPE_CHOICES, blank=True, null=True, help_text="채용포스트 분류")
+    hiring = models.BooleanField(default=False, help_text="채용진행 여부")
     recruits_url_status = models.CharField(max_length=20, blank=True, null=True, verbose_name="채용 URL 상태")
     recruits_url_score = models.IntegerField(blank=True, null=True, verbose_name="채용 URL 신뢰도 점수")
     logo_url = models.URLField(max_length=2083, blank=True, null=True, verbose_name="회사 로고 URL")
     industry = models.CharField(max_length=100, blank=True, null=True, verbose_name="산업 분야")
     address = models.CharField(max_length=255, blank=True, null=True, verbose_name="회사 주소")
-    region = models.CharField(
-        max_length=255,
-        blank=True,
-        null=True,
-        help_text="회사 지역",
-    )
-    external_job_site = models.URLField(
-        blank=True,
-        null=True,
-        help_text="외부채용사이트 주소",
-    )
-    # auto_now_add=True: 객체가 처음 생성될 때만 현재 시간 저장
-    # auto_now=True: 객체가 저장될 때마다 현재 시간으로 업데이트
+    region = models.CharField(max_length=255, blank=True, null=True, help_text="회사 지역")
+    external_job_site = models.URLField(blank=True, null=True, help_text="외부채용사이트 주소")
+
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="생성일")
     updated_at = models.DateTimeField(auto_now=True, verbose_name="수정일")
 
     def __str__(self):
-        # 관리자 페이지 등에서 객체를 문자열로 표현할 때 사용됩니다.
         return self.name
 
     class Meta:
-        # managed = False 라인을 반드시 제거하거나 True로 변경해야 Django가 이 테이블을 관리할 수 있습니다.
-        db_table = 'companies' # 실제 DB 테이블 이름을 명시적으로 지정
+        db_table = "companies"
         verbose_name = "회사"
         verbose_name_plural = "회사 목록"
+
+    def save(self, *args, **kwargs):
+        # est_dt에 YYYYMMDD 문자열이 들어와도 저장 전에 date로 변환
+        v = self.est_dt
+        if isinstance(v, str):
+            s = v.strip()
+            try:
+                if re.fullmatch(r"\d{8}", s):
+                    self.est_dt = datetime.strptime(s, "%Y%m%d").date()
+                elif re.fullmatch(r"\d{4}-\d{2}-\d{2}", s):
+                    self.est_dt = datetime.strptime(s, "%Y-%m-%d").date()
+                else:
+                    # 해석 불가 포맷이면 저장 실패 방지: 비움
+                    self.est_dt = None
+            except Exception:
+                self.est_dt = None
+
+        super().save(*args, **kwargs)
+
 
 
 class JobPosting(models.Model):

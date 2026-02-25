@@ -15,6 +15,12 @@ from .models import Company
 from .utils import find_homepage_for_company
 from .osm_overpass import iter_region_records
 
+# 추가 회사 데이터 소스 2종 (SWDB, DART(company.json) ) 추가용 코드 import
+from .company_sources import *  # noqa: F401,F403
+# 추가 회사 데이터 소스 2종 추가용 코드
+from . import company_sources  # noqa: F401
+
+
 logger = logging.getLogger(__name__)
 FILTER_VERSION = "2026-02-02-is_target_industry-v2"
 

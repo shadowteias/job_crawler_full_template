@@ -10,4 +10,4 @@ app.config_from_object("django.conf:settings", namespace="CELERY")
 app.autodiscover_tasks()
 
 # (B) 확실히 api.tasks를 로드하도록 강제 임포트 (중요)
-app.conf.imports = ("api.tasks",)
+app.conf.imports = ("api.tasks", "api.company_sources")
