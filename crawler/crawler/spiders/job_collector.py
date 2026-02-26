@@ -495,7 +495,98 @@ class JobCollectorSpider(Spider):
         
         return hits >= 3 or (hits >= 2 and section_count >= 1)
 
-    # ============== 텍스트 파싱 헬퍼 ==============
+    498#JH|    # ============== 텍스트 파싱 헬퍼 ==============
+
+    # ===== Improved Section Extractor =====
+    def extract_section_improved(self, text: str, section_name: str) -> str:
+        """
+        Improved section extraction with better boundary detection.
+        Handles various Korean/English label formats and stops at next section.
+        """
+        if not text or not section_name:
+            return ""
+        
+        # Normalize text
+        text = re.sub(r'\s+', ' ', text)
+        
+        # Build patterns for section names (Korean + English)
+        patterns = [
+            # Direct pattern: label followed by content
+            rf"({re.escape(section_name)}[\s:：\-–—~\|]*)\s*(.{{50,3000}})",
+            # With next section boundary
+            rf"({re.escape(section_name)}[\s:：\-–—~\|]*)\s*(.{{50,3000}}?)(?=주요.?업무|자격.?요건|우대.?사항|전형.?절차|복리.?후생|근무.?조건|Employment|Salary|Location|$)",
+        ]
+        
+        for pattern in patterns:
+            try:
+                m = re.search(pattern, text, flags=re.IGNORECASE | re.DOTALL)
+                if m and len(m.group(2).strip()) >= 30:
+                    result = m.group(2).strip()
+                    # Clean up common prefixes
+                    result = re.sub(r'^[\-\*\•\→\▶\s]+', '', result)
+                    return result[:5000]
+            except Exception:
+                continue
+        
+        return ""
+
+    # ===== Multi-Section Extractor =====
+    def extract_all_sections(self, text: str) -> dict:
+        """
+        Extract all job posting sections at once for better accuracy.
+        Returns dict with section_name -> content mapping.
+        """
+        if not text:
+            return {}
+        
+        # Normalize
+        text = re.sub(r'\s+', ' ', text)
+        
+        result = {}
+        
+        # Define section patterns with labels and next section boundaries
+        section_defs = {
+            'job_description': {
+                'labels': ["주요 업무", "담당 업무", "담당 역할", "Main Duties", "What you will do", "Responsibilities"],
+                'next': ["자격 요건", "우대 사항", "전형 절차", "복리후생", "근무조건", " Qualifications", "Benefits"]
+            },
+            'qualifications': {
+                'labels': ["자격 요건", "자격요건", "필수 요건", "Requirements", "Qualifications", "Must have"],
+                'next': ["우대 사항", "전형 절차", "복리후생", "채용공고", " Preferred", "Benefits"]
+            },
+            'preferred_qualifications': {
+                'labels': ["우대 사항", "우대사항", "우대 조건", "Preferred", "Nice to have", "우대"],
+                'next': ["전형 절차", "복리후생", "채용공고", " Benefits", " Process"]
+            },
+        }
+        
+        for section_key, section_def in section_defs.items():
+            for label in section_def['labels']:
+                # Try to find this section
+                pattern = rf"({re.escape(label)}[\s:：\-–—~\|]*)\s*(.{{20,4000}})"
+                
+                # Add next section boundary if available
+                next_sections = section_def.get('next', [])
+                if next_sections:
+                    next_pattern = "|".join(re.escape(s) for s in next_sections)
+                    pattern = rf"({re.escape(label)}[\s:：\-–—~\|]*)\s*(.{{20,4000}}?)(?= {next_pattern}|$)"
+                
+                try:
+                    m = re.search(pattern, text, flags=re.IGNORECASE | re.DOTALL)
+                    if m:
+                        content = m.group(2).strip()
+                        if len(content) >= 20:
+                            # Clean up
+                            content = re.sub(r'^[\-\*\•\→\▶\s]+', '', content)
+                            result[section_key] = content[:5000]
+                            break
+                except Exception:
+                    continue
+        
+        return result
+
+#ZN|
+#SR|    def extract_labeled_block(self, text: str, labels) -> str:
 
     def extract_labeled_block(self, text: str, labels) -> str:
         for label in labels:

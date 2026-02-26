@@ -517,7 +517,7 @@ class DiscoverCareersSpider(Spider):
         parsed = urlparse(homepage_url)
         self.start_domain = parsed.netloc
 
-        self.max_depth = 3
+        self.max_depth = 4
         self.visited = set()
 
     # Scrapy 2.13 경고 회피 위해 start_requests 유지 (하위호환),
@@ -553,6 +553,22 @@ class DiscoverCareersSpider(Spider):
                     dont_filter=True,
                 )
                 return
+
+        # ===== Negative Keywords Detection & Alternative Links =====
+        text = self._get_text(response)
+        has_negative = self.has_negative_keywords(text)
+        
+        # If negative keywords found, try to find alternative job links
+        if has_negative:
+            logger.info("[discover] Negative keywords detected, looking for alternatives: %s", url)
+            alt_links = self.find_alternative_job_links(response)
+            for alt_url in alt_links:
+                if alt_url not in self.visited and self.is_same_domain(alt_url):
+                    logger.info("[discover] Following alternative: %s", alt_url)
+                    self.visited.add(alt_url)
+                    yield Request(url=alt_url, callback=self.parse_page, meta={"depth": depth + 1}, dont_filter=True)
+                    return
+            logger.info("[discover] No alternative found, continuing search")
 
 
         # 1) 외부 채용 플랫폼 링크가 이 페이지 안에 하나라도 있으면:
@@ -648,6 +664,62 @@ class DiscoverCareersSpider(Spider):
             if kw.lower() in combined:
                 score += 10
         return score
+
+    # ===== Negative Keywords Checker =====
+    def has_negative_keywords(self, text: str) -> bool:
+        NEGATIVE_KEYWORDS = [
+            "인재상", "인재 소개", "CEO인사말", "대표이사 인사말", "회장 인사말",
+            "비전", "VISION", "경영진 소개",
+            "복리후생", "복지제도", "사내문화", "회사문화", "직원채용",
+            "조직도", "연혁", "HISTORY", "회사개요", "기업개요",
+            "FAQ", "자주하는질문", "QnA",
+        ]
+        if not text:
+            return False
+        t = text.lower()
+        for kw in NEGATIVE_KEYWORDS:
+            if kw.lower() in t:
+                self.logger.info(f"[discover] Negative keyword found: {kw}")
+                return True
+        return False
+
+    # ===== Alternative Job Links Finder =====
+    def find_alternative_job_links(self, response) -> list:
+        POSITIVE_JOB_KEYWORDS = [
+            "채용공고", "채용안내", "채용정보", "채용 목록", "채용요강",
+            "입사지원", "채용중", "모집중", "공고 목록",
+            "채용사이트", "job posting", "positions",
+        ]
+        AVOID_KEYWORDS = [
+            "인재상", "인재 소개", "비전", "복리후생", "복지",
+            "조직도", "연혁", "인사말", "CEO",
+        ]
+        
+        candidates = []
+        for link in response.css("a"):
+            href = (link.attrib.get("href") or "").strip()
+            if not href or href.startswith("#") or href.lower().startswith("javascript:"):
+                continue
+            
+            text = " ".join(link.css("::text").getall()).strip().lower()
+            label = " ".join(filter(None, [
+                link.attrib.get("title"),
+                link.attrib.get("aria-label"),
+            ])).strip().lower()
+            
+            combined = f"{text} {label}"
+            
+            # Skip if contains avoid keywords
+            if any(kw.lower() in combined for kw in AVOID_KEYWORDS):
+                continue
+            
+            # Check if contains positive job keywords
+            if any(kw.lower() in combined for kw in POSITIVE_JOB_KEYWORDS):
+                full_url = response.urljoin(href)
+                if full_url not in candidates:
+                    candidates.append(full_url)
+        
+        return candidates
 
     # ===== 판단 엔진 =====
 
