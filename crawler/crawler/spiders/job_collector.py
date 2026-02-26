@@ -400,7 +400,13 @@ class JobCollectorSpider(Spider):
                 full_text,
                 ["주요 업무", "담당 업무", "Main Duties", "What you will do"],
             )
-            job_desc = (main or full_text)[:20000]
+            # Don't fall back to full text - that's why we get entire page HTML
+            # Only use extracted content if available
+            if main and len(main) >= 50:
+                job_desc = main[:20000]
+            else:
+                # If extraction failed, leave job_desc empty rather than using full text
+                job_desc = ""
 
         if not qualifications:
             qualifications = self.extract_labeled_block(
@@ -475,7 +481,19 @@ class JobCollectorSpider(Spider):
             if kw in lowered:
                 hits += 1
 
-        return hits >= 2
+        # Stricter check - require more keywords OR section headings
+        
+        # Add negative filters
+        neg_patterns = ["개인정보처리방침", "이용약관", "쿠키", "사이트맵", "IR", "보도자료", "블로그", "인재상", "비전", "복리후생", "복지제도"]
+        neg_count = sum(1 for p in neg_patterns if p in lowered)
+        if neg_count >= 3:
+            return False
+        
+        # Check for section headings
+        section_headings = ["주요 업무", "자격 요건", "우대 사항", "전형 절차", "복리후생", "근무지", "채용공고", "모집요강"]
+        section_count = sum(1 for s in section_headings if s in lowered)
+        
+        return hits >= 3 or (hits >= 2 and section_count >= 1)
 
     # ============== 텍스트 파싱 헬퍼 ==============
 
