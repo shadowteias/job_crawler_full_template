@@ -545,11 +545,21 @@ def run_discover_careers_spiders(limit=None):
     """
     from django.db.models import Q
 
-    qs = Company.objects.filter(
-        homepage_url__isnull=False
-    ).filter(
-        Q(recruits_url__isnull=True) | Q(recruits_url="")
-    ).order_by("id")
+    # NOTE: discovery should only run for companies whose homepage is considered "alive".
+    # We treat 2xx/3xx and common access/behavioral blocks (401/403/405/406) as alive.
+    alive_q = (
+        Q(homepage_url_status="alive")
+        | Q(homepage_last_status_code__gte=200, homepage_last_status_code__lt=400)
+        | Q(homepage_last_status_code__in=[401, 403, 405, 406])
+    )
+
+    qs = (
+        Company.objects.exclude(homepage_url__isnull=True)
+        .exclude(homepage_url="")
+        .filter(alive_q)
+        .filter(Q(recruits_url__isnull=True) | Q(recruits_url=""))
+        .order_by("id")
+    )
 
     if limit:
         qs = qs[:int(limit)]

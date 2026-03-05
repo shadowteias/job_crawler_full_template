@@ -24,6 +24,7 @@ TEXT_PAGE_TYPES = {"listing", "one_page", "main"}
 JOB_ANCHOR_KEYWORDS = [
     "채용", "모집", "인턴", "구인", "경력", "신입", "구합니다",
     "recruit", "recruitment", "job", "jobs", "career", "careers",
+    "position", "positions", "open position", "open positions", "role", "roles", "apply",
 ]
 
 # 목록에서 아예 빼버릴 앵커(전형 절차/지원서/FAQ 등)
@@ -158,23 +159,159 @@ class JobCollectorSpider(Spider):
                 dont_filter=True,
             )
 
+    def _get_visible_text(self, response) -> str:
+        def _texts(root_xpath: str) -> str:
+            parts = response.xpath(
+                root_xpath
+                + "//text()[not(ancestor::script) and not(ancestor::style) and not(ancestor::noscript) and normalize-space()]"
+            ).getall()
+            text = " ".join((p or "").strip() for p in parts if p and p.strip())
+            return re.sub(r"\s+", " ", text).strip()
+
+        # Prefer likely main content containers to avoid nav/footer boilerplate.
+        candidates = []
+        for xp in [
+            "//main",
+            "//article",
+            "//*[@id='content' or @id='contents' or contains(@class,'content') or contains(@class,'contents') or contains(@class,'view') or contains(@class,'board') or contains(@class,'recruit') or contains(@class,'career') or contains(@class,'job')]",
+        ]:
+            try:
+                t = _texts(xp)
+                if len(t) >= 200:
+                    candidates.append(t)
+            except Exception:
+                continue
+
+        if candidates:
+            # pick the longest content-like block
+            return max(candidates, key=len)
+
+        return _texts("//body")
+
+    def _trim_boilerplate(self, text: str) -> str:
+        if not text:
+            return ""
+        t = re.sub(r"\s+", " ", text).strip()
+        cut_markers = [
+            "개인정보처리방침",
+            "이용약관",
+            "쿠키",
+            "Copyright",
+            "All Rights Reserved",
+            "사이트맵",
+        ]
+        low = t.lower()
+        cut_at = None
+        for m in cut_markers:
+            idx = low.find(m.lower())
+            if idx != -1:
+                cut_at = idx if cut_at is None else min(cut_at, idx)
+        if cut_at is not None and cut_at >= 200:
+            t = t[:cut_at].strip()
+        return t
+
+    def _looks_like_job_body(self, text: str) -> bool:
+        """Best-effort quality gate to avoid saving pure navigation/sitemap text."""
+        if not text:
+            return False
+        t = re.sub(r"\s+", " ", text).strip()
+        if len(t) < 200:
+            return False
+
+        lowered = t.lower()
+        # Hard negatives that frequently show up in global nav dumps.
+        if any(bad in lowered for bad in [
+            "전체메뉴",
+            "gnb",
+            "사이트맵",
+            "all rights reserved",
+        ]):
+            return False
+
+        # Positive signals: sections / hiring intent / structured content.
+        signals = 0
+        for kw in [
+            "주요 업무",
+            "자격 요건",
+            "우대 사항",
+            "전형 절차",
+            "근무조건",
+            "근무지",
+            "급여",
+            "연봉",
+            "지원방법",
+            "지원하기",
+            "apply",
+            "responsibilities",
+            "qualifications",
+            "benefits",
+        ]:
+            if kw.lower() in lowered:
+                signals += 1
+        # Also allow bullet-like density.
+        if re.search(r"(\n|\r|\s)[\-\*\u2022]\s*", text):
+            signals += 1
+
+        return signals >= 1
+
+    def _pick_title(self, response) -> str:
+        candidates = [
+            (response.css("h1::text").get() or "").strip(),
+            (response.css("h2::text").get() or "").strip(),
+            (response.css("title::text").get() or "").strip(),
+        ]
+        bad = {
+            "전체메뉴",
+            "하단메뉴 및 카피라이트",
+            "고객지원",
+            "contact us",
+            "download",
+            "careers",
+        }
+        for c in candidates:
+            if not c:
+                continue
+            if c.strip().lower() in bad:
+                continue
+            if len(c.strip()) < 2:
+                continue
+            return c[:255]
+        # fallback
+        for c in candidates:
+            if c:
+                return c[:255]
+        return "채용 공고"
+
     # ============== 공통: 외부 플랫폼 감지 ==============
 
     def _check_external_platform(self, response):
+        # We must not crawl external job platforms.
+        # However, many company pages include external job-platform links in footers or references.
+        # Abort only if the current page itself is an external platform; otherwise, ignore external links.
+        page_lower = (response.url or "").lower()
+        if any(d in page_lower for d in EXTERNAL_JOB_DOMAINS):
+            logger.warning(
+                "job_collector: external platform page detected company_id=%s page=%s -> abort",
+                self.company_id,
+                response.url,
+            )
+            raise CloseSpider("external_job_platform_page")
+
+        # Just log if external links are present.
         for href in response.css("a::attr(href)").getall():
             if not href:
                 continue
             url = response.urljoin(href.strip())
             lower = url.lower()
             if any(d in lower for d in EXTERNAL_JOB_DOMAINS):
-                logger.warning(
-                    "job_collector: external platform link detected "
-                    "company_id=%s page=%s target=%s -> abort",
+                logger.info(
+                    "job_collector: external platform link ignored company_id=%s page=%s target=%s",
                     self.company_id,
                     response.url,
                     url,
                 )
-                raise CloseSpider("external_job_platform_detected")
+                # Do not abort; ignore.
+                return
 
     # ============== listing 처리 ==============
 
@@ -221,21 +358,26 @@ class JobCollectorSpider(Spider):
 
             parsed = urlparse(full)
 
-            # 외부 플랫폼 -> 정책상 크롤링 안 함
+            # 외부 플랫폼 -> 정책상 크롤링 안 함 (skip link only)
             if any(d in parsed.netloc.lower() for d in EXTERNAL_JOB_DOMAINS):
-                logger.warning(
-                    "job_collector: external platform link on listing "
-                    "company_id=%s target=%s -> abort",
-                    self.company_id,
-                    full_clean,
-                )
-                raise CloseSpider("external_job_platform_detected")
+                continue
 
             # 같은 조직 도메인(또는 동일 최상위 도메인)만 본다
             if not self._same_org(base_domain, parsed.netloc):
                 continue
 
             anchor_text_raw = " ".join(a.css("::text").getall()).strip()
+            if not anchor_text_raw:
+                # icon-only links often rely on title/aria-label
+                anchor_text_raw = " ".join(
+                    filter(
+                        None,
+                        [
+                            (a.attrib.get("title") or "").strip(),
+                            (a.attrib.get("aria-label") or "").strip(),
+                        ],
+                    )
+                ).strip()
             if not anchor_text_raw:
                 continue
 
@@ -246,7 +388,33 @@ class JobCollectorSpider(Spider):
                 continue
 
             # 채용/모집/인턴/경력/신입/구인/구합니다 등 포함되면 후보 인정
-            if any(kw in anchor_text for kw in JOB_ANCHOR_KEYWORDS):
+            by_text = any(kw in anchor_text for kw in JOB_ANCHOR_KEYWORDS)
+
+            # Anchor text가 job keyword를 포함하지 않는 경우라도,
+            # URL path가 job detail로 강하게 보이면 후보로 포함 (JS/ATS 랜딩 대응).
+            path = (parsed.path or "").lower()
+            url_positive = any(p in path for p in [
+                "/recruit",
+                "/recruitment",
+                "/career",
+                "/careers",
+                "/job",
+                "/jobs",
+                "/position",
+                "/positions",
+                "/opening",
+                "/openings",
+            ])
+            url_negative = any(p in path for p in [
+                "/privacy",
+                "/terms",
+                "/sitemap",
+                "/ir",
+                "/contact",
+                "/about",
+            ])
+
+            if by_text or (url_positive and not url_negative and len(path) >= 5):
                 if full_clean not in seen:
                     seen.add(full_clean)
                     candidates.append(full_clean)
@@ -270,20 +438,29 @@ class JobCollectorSpider(Spider):
 
         url = response.url
         headings = response.css("h2, h3")
-        full_text_body = " ".join(response.css("body ::text").getall())
-        full_text_body = re.sub(r"\s+", " ", full_text_body).strip()
+        full_text_body = self._get_visible_text(response)
 
         jobs = []
 
         # 헤딩이 없는 경우: 페이지 전체를 하나의 공고 후보로
         if not headings:
             if len(full_text_body) >= 80 and self._accept_as_job(full_text_body):
+                sections = self.extract_all_sections(full_text_body)
+                desc = (
+                    sections.get("job_description")
+                    or sections.get("qualifications")
+                    or ""
+                ).strip()
+                if not desc:
+                    desc = self._trim_boilerplate(full_text_body)
+                if len(desc) < 120 or not self._looks_like_job_body(desc):
+                    return
                 jobs.append({
                     "post_url": url,
-                    "title": response.css("title::text").get(default="채용 공고").strip(),
-                    "job_description": full_text_body[:20000],
-                    "location": self.extract_location(full_text_body),
-                    "benefits": self.extract_benefits(full_text_body),
+                    "title": self._pick_title(response),
+                    "job_description": desc[:20000],
+                    "location": self.extract_location(desc),
+                    "benefits": self.extract_benefits(desc),
                 })
         else:
             # 헤딩 기준으로 블록 분할
@@ -310,7 +487,7 @@ class JobCollectorSpider(Spider):
                 jobs.append({
                     "post_url": f"{url}#job-{i}",
                     "title": title,
-                    "job_description": desc[:20000],
+                    "job_description": self._trim_boilerplate(desc)[:20000],
                     "location": self.extract_location(desc),
                     "benefits": self.extract_benefits(desc),
                 })
@@ -342,17 +519,9 @@ class JobCollectorSpider(Spider):
     def extract_job_from_detail(self, response, from_listing=False):
         url = response.url.rstrip("/")
 
-        title = (
-            response.css("h1::text").get()
-            or response.css("h2::text").get()
-            or response.css("title::text").get()
-            or ""
-        ).strip()
-        if not title:
-            return None
+        title = self._pick_title(response)
 
-        full_text = " ".join(response.css("body ::text").getall())
-        full_text = re.sub(r"\s+", " ", full_text).strip()
+        full_text = self._get_visible_text(response)
         if len(full_text) < 40:
             return None
 
@@ -395,18 +564,33 @@ class JobCollectorSpider(Spider):
         salary = parsed.get("salary") or ""
         location = parsed.get("location") or ""
 
+        # section extraction (more robust than a single label)
+        if not job_desc:
+            sections = self.extract_all_sections(full_text)
+            job_desc = (sections.get("job_description") or "").strip()
+            if not qualifications:
+                qualifications = (sections.get("qualifications") or "").strip()
+            if not preferred:
+                preferred = (sections.get("preferred_qualifications") or "").strip()
+
         if not job_desc:
             main = self.extract_labeled_block(
                 full_text,
                 ["주요 업무", "담당 업무", "Main Duties", "What you will do"],
             )
-            # Don't fall back to full text - that's why we get entire page HTML
-            # Only use extracted content if available
             if main and len(main) >= 50:
                 job_desc = main[:20000]
             else:
-                # If extraction failed, leave job_desc empty rather than using full text
-                job_desc = ""
+                # If extraction failed, only accept a minimal fallback when the page strongly looks like a job posting.
+                trimmed = self._trim_boilerplate(full_text)
+                if self._accept_as_job(trimmed) and len(trimmed) >= 300:
+                    job_desc = trimmed[:5000]
+                else:
+                    return None
+
+        # Final quality gate: avoid saving pure nav/sitemap text.
+        if not job_desc or not self._looks_like_job_body(job_desc):
+            return None
 
         if not qualifications:
             qualifications = self.extract_labeled_block(

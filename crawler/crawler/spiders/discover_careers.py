@@ -584,21 +584,27 @@ class DiscoverCareersSpider(Spider):
         text = self._get_text(response)
 
         # 2) listing 형태 추정
-        if self.looks_like_listing(response, text):
-            self.save_result(
-                page_url=url,
-                page_type="listing",
-                post_type="text",
-            )
-            return
+        if self.looks_like_listing(response, text, depth):
+            # Guard: some pages look like listings only because global nav contains "채용" links.
+            # Require minimal job intent in visible text before fixing recruits_url.
+            if self.has_job_intent(response):
+                post_type = self.detect_post_type(response)
+                self.save_result(
+                    page_url=url,
+                    page_type="listing",
+                    post_type=post_type,
+                )
+                return
+            logger.info("[discover] listing-like but no job intent; continue searching url=%s", url)
 
         # 3) one_page / main 형태 추정
         if self.looks_like_onepage(response, text, depth):
             page_type = "main" if depth == 0 else "one_page"
+            post_type = self.detect_post_type(response)
             self.save_result(
                 page_url=url,
                 page_type=page_type,
-                post_type="text",
+                post_type=post_type,
             )
             return
 
@@ -842,6 +848,89 @@ class DiscoverCareersSpider(Spider):
 
     def _get_text(self, response):
         return " ".join(response.css("body ::text").getall())
+
+    def _get_visible_text(self, response) -> str:
+        # Exclude script/style/noscript to avoid inflating text length.
+        parts = response.xpath(
+            "//body//text()[not(ancestor::script) and not(ancestor::style) and not(ancestor::noscript) and normalize-space()]"
+        ).getall()
+        return " ".join((p or "").strip() for p in parts if p and p.strip())
+
+    def has_job_intent(self, response) -> bool:
+        text = (self._get_visible_text(response) or "").lower()
+        return any(k in text for k in [
+            "채용",
+            "채용공고",
+            "모집",
+            "입사지원",
+            "recruit",
+            "career",
+            "jobs",
+            "hiring",
+        ])
+
+    def detect_post_type(self, response) -> str:
+        """Detect whether the recruiting page is primarily text-based or image/PDF-based.
+
+        We keep Company.post_type within existing choices:
+        - 'text': page is suitable for text extraction
+        - 'image': page is primarily poster/PDF/image-based
+        """
+        # 1) PDF embeds / links
+        # NOTE: Scrapy's CSS selector engine (cssselect) doesn't support the CSS4 case-insensitive flag.
+        # Use XPath + translate() for a case-insensitive contains.
+        pdf_hit = response.xpath(
+            "//embed[contains(translate(@type,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'pdf')]/@src | "
+            "//embed[contains(translate(@src,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'.pdf')]/@src | "
+            "//iframe[contains(translate(@src,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'.pdf')]/@src | "
+            "//object[contains(translate(@data,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'.pdf')]/@data | "
+            "//a[contains(translate(@href,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'.pdf')]/@href"
+        ).get()
+        if pdf_hit:
+            return "image"
+
+        visible_text = self._get_visible_text(response)
+        text_len = len((visible_text or "").strip())
+
+        # 2) Poster-like images
+        poster_images = 0
+        poster_domains = ("imgbb.", "ifh.cc", "postfiles.pstatic.net", "blog.kakaocdn.net")
+        img_exts = (".jpg", ".jpeg", ".png", ".gif", ".webp")
+
+        for img in response.css("img"):
+            style = (img.attrib.get("style") or "").lower()
+            src = (img.attrib.get("src") or "").strip().lower()
+            w_raw = (img.attrib.get("width") or "").strip()
+            h_raw = (img.attrib.get("height") or "").strip()
+
+            def _to_int(s: str) -> int:
+                try:
+                    digits = "".join(ch for ch in s if ch.isdigit())
+                    return int(digits) if digits else 0
+                except Exception:
+                    return 0
+
+            w = _to_int(w_raw)
+            h = _to_int(h_raw)
+            sizeish = (w >= 200 or h >= 200 or "width:100" in style or "width: 100" in style)
+            srcish = (any(ext in src for ext in img_exts) or any(d in src for d in poster_domains))
+            if sizeish and srcish:
+                poster_images += 1
+
+        # background-image posters
+        for style in response.xpath(
+            "//*[contains(translate(@style,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'background-image')]/@style"
+        ).getall():
+            s = (style or "").lower()
+            if any(ext in s for ext in (".jpg", ".jpeg", ".png", ".gif", ".webp")):
+                poster_images += 1
+                break
+
+        # 3) Heuristic classification
+        if text_len < 500 and poster_images >= 1:
+            return "image"
+
+        return "text"
 
     def is_same_domain(self, url: str) -> bool:
         """
