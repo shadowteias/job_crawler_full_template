@@ -615,6 +615,97 @@ def run_discover_careers_spiders(limit=None):
 
 
 @shared_task
+def run_discover_careers_spiders_concurrent(limit=None, workers=20):
+    """
+    Concurrent version of run_discover_careers_spiders.
+    Runs multiple spider subprocesses in parallel using ThreadPoolExecutor.
+    workers: number of concurrent spider processes (default 20).
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from django.db.models import Q
+
+    alive_q = (
+        Q(homepage_url_status="alive")
+        | Q(homepage_last_status_code__gte=200, homepage_last_status_code__lt=400)
+        | Q(homepage_last_status_code__in=[401, 403, 405, 406])
+    )
+
+    qs = (
+        Company.objects.exclude(homepage_url__isnull=True)
+        .exclude(homepage_url="")
+        .filter(alive_q)
+        .filter(Q(recruits_url__isnull=True) | Q(recruits_url=""))
+        .order_by("id")
+        .values_list("id", "homepage_url")
+    )
+
+    if limit:
+        qs = list(qs[: int(limit)])
+    else:
+        qs = list(qs)
+
+    total = len(qs)
+    saved = 0
+    failed = 0
+
+    def run_one(company_id, homepage_url):
+        cmd = [
+            "scrapy", "crawl", "discover_careers",
+            "-a", f"company_id={company_id}",
+            "-a", f"homepage_url={homepage_url}",
+        ]
+        try:
+            result = subprocess.run(
+                cmd,
+                cwd="/app/crawler",
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=120,
+            )
+            return company_id, result.returncode == 0, homepage_url
+        except subprocess.TimeoutExpired:
+            logger.warning("Spider timed out for company_id=%s", company_id)
+            return company_id, False, homepage_url
+        except Exception as e:
+            logger.warning("Spider failed for company_id=%s (%s)", company_id, e)
+            return company_id, False, homepage_url
+
+    start = time.time()
+    logger.info("run_discover_careers_spiders_concurrent: starting %d companies with %d workers", total, workers)
+
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {
+            executor.submit(run_one, cid, hurl): (cid, hurl)
+            for cid, hurl in qs
+        }
+        for future in as_completed(futures):
+            cid, ok, hurl = future.result()
+            close_old_connections()
+            if ok:
+                saved += 1
+                logger.info("  [saved] company_id=%s url=%s", cid, hurl)
+            else:
+                failed += 1
+
+            # Progress log every 100 completed
+            done = saved + failed
+            if done % 100 == 0:
+                elapsed = time.time() - start
+                rate = done / elapsed
+                eta = (total - done) / rate if rate > 0 else 0
+                logger.info("  progress: %d/%d saved=%d failed=%d (%.1f co/s, ETA %.0fs)",
+                            done, total, saved, failed, rate, eta)
+
+    elapsed = time.time() - start
+    logger.info(
+        "run_discover_careers_spiders_concurrent: DONE total=%d saved=%d failed=%d elapsed=%.1fs",
+        total, saved, failed, elapsed,
+    )
+    return {"total": total, "saved": saved, "failed": failed, "elapsed": elapsed}
+
+
+@shared_task
 def run_job_collector_spiders(limit=None):
     """
     recruits_url이 있고 회사들에 대해 job_collector 스파이더를 실행.
@@ -684,6 +775,95 @@ def run_job_collector_spiders(limit=None):
             )
 
     logger.info("run_job_collector_spiders: finished all targets")
+
+
+@shared_task
+def run_job_collector_spiders_concurrent(limit=None, workers=10):
+    """
+    Concurrent version of run_job_collector_spiders.
+    Runs multiple job_collector spider subprocesses in parallel using ThreadPoolExecutor.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    qs = (
+        Company.objects.filter(recruits_url__isnull=False)
+        .exclude(recruits_url="")
+        .order_by("id")
+        .values_list("id", "recruits_url", "page_type", "post_type")
+    )
+
+    if limit:
+        qs = list(qs[: int(limit)])
+    else:
+        qs = list(qs)
+
+    total = len(qs)
+    completed = 0
+    failed = 0
+
+    base_env = os.environ.copy()
+
+    def run_one(company_id, recruits_url, page_type, post_type):
+        cmd = [
+            "scrapy", "crawl", "job_collector",
+            "-a", f"company_id={company_id}",
+            "-a", f"recruits_url={recruits_url}",
+            "-a", f"page_type={page_type or 'listing'}",
+            "-a", f"post_type={post_type or 'text'}",
+        ]
+        try:
+            result = subprocess.run(
+                cmd,
+                cwd="/app/crawler",
+                env=base_env,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=300,
+            )
+            return company_id, result.returncode == 0, recruits_url
+        except subprocess.TimeoutExpired:
+            logger.warning("job_collector timed out for company_id=%s", company_id)
+            return company_id, False, recruits_url
+        except Exception as e:
+            logger.warning("job_collector failed for company_id=%s (%s)", company_id, e)
+            return company_id, False, recruits_url
+
+    start = time.time()
+    logger.info(
+        "run_job_collector_spiders_concurrent: starting %d companies with %d workers",
+        total, workers,
+    )
+
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {
+            executor.submit(run_one, cid, url, pt, pst): (cid, url)
+            for cid, url, pt, pst in qs
+        }
+        for future in as_completed(futures):
+            cid, ok, url = future.result()
+            close_old_connections()
+            if ok:
+                completed += 1
+            else:
+                failed += 1
+
+            done = completed + failed
+            if done % 200 == 0:
+                elapsed = time.time() - start
+                rate = done / elapsed
+                eta = (total - done) / rate if rate > 0 else 0
+                logger.info(
+                    "  progress: %d/%d completed=%d failed=%d (%.1f co/s, ETA %.0fs)",
+                    done, total, completed, failed, rate, eta,
+                )
+
+    elapsed = time.time() - start
+    logger.info(
+        "run_job_collector_spiders_concurrent: DONE total=%d completed=%d failed=%d elapsed=%.1fs",
+        total, completed, failed, elapsed,
+    )
+    return {"total": total, "completed": completed, "failed": failed, "elapsed": elapsed}
 
 
 @shared_task(name="api.tasks.run_full_crawling_cycle")
