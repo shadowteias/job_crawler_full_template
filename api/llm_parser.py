@@ -1,16 +1,138 @@
 # api/llm_parser.py
 
 import os
+import re
+import logging
+from datetime import datetime, timedelta
 from functools import lru_cache
 
 from transformers import AutoTokenizer, AutoModelForSequenceClassification, pipeline
 
-# 한국어 지원되는 NLI/분류용 모델 (로컬에 다운로드됨)
-# 필요하면 환경 변수로 바꿀 수 있게 해둠.
+logger = logging.getLogger(__name__)
+
 JOB_CLASSIFIER_MODEL = os.getenv(
     "JOB_CLASSIFIER_MODEL",
-    "joeddav/xlm-roberta-large-xnli"  # 한국어 포함 멀티링구얼 NLI
+    "joeddav/xlm-roberta-large-xnli"
 )
+
+SECTION_HEADERS = [
+    "주요 업무", "담당 업무", "담당 역할", "주요업무",
+    "자격 요건", "자격요건", "필수 요건",
+    "우대 사항", "우대사항", "우대 조건", "우대조건",
+    "전형 절차", "채용 절차", "전형절차",
+    "복리후생", "복리 후생", "혜택",
+    "근무조건", "근무 조건", "고용 형태",
+    "급여", "연봉", "급여조건",
+    "근무지", "근무 장소", "근무지역",
+]
+
+SECTION_STOP_HEADERS = [
+    "개인정보처리방침", "이용약관", "쿠키", "Copyright",
+    "채용공고", "모집요강", "지원하기", "apply",
+]
+
+NEXT_SECTION_MARKERS = [
+    "📢", "자격요건", "우대조건", "담당업무", "모집직무",
+    "채용절차", "전형절차", "복리후생", "지원방법",
+]
+
+
+def _parse_date(year_str: str, month_str: str, day_str: str) -> datetime:
+    try:
+        year = int(year_str)
+        month = int(month_str)
+        day = int(day_str)
+        if 2020 <= year <= 2030 and 1 <= month <= 12 and 1 <= day <= 31:
+            return datetime(year, month, day)
+    except (ValueError, OverflowError):
+        pass
+    return None
+
+
+def _extract_dates(text: str) -> tuple:
+    deadline_at = None
+    posted_at = None
+
+    text_combined = ' '.join(text.split())
+
+    deadline_keywords = ["마감", "지원", "截止", "기한", "까지"]
+    posted_keywords = ["게시", "등록", "작성", "시작", "작성일"]
+
+    date_patterns = [
+        r"(\d{4})\.(\d{1,2})\.(\d{1,2})",
+        r"(\d{4})\.\s*(\d{1,2})\.\s*(\d{1,2})",
+        r"(\d{4})-(\d{1,2})-(\d{1,2})",
+        r"(\d{4})/(\d{1,2})/(\d{1,2})",
+        r"(\d{4})\s*년\s*(\d{1,2})\s*월\s*(\d{1,2})\s*일",
+        r"(\d{4})\s+(\d{1,2})\s+(\d{1,2})",
+        r"(\d{2})\s*년\s*(\d{1,2})\s*월\s*(\d{1,2})\s*일",
+    ]
+
+    candidates = []
+
+    for pattern in date_patterns:
+        for match in re.finditer(pattern, text_combined):
+            year_str, month_str, day_str = match.groups()
+            
+            if len(year_str) == 2:
+                year_str = "20" + year_str
+            
+            dt = _parse_date(year_str, month_str, day_str)
+            if dt:
+                pos = match.start()
+                context = text_combined[max(0, pos-10):pos+10].lower()
+                
+                is_deadline = any(kw in context for kw in deadline_keywords)
+                is_posted = any(kw in context for kw in posted_keywords)
+                
+                candidates.append((dt, pos, is_deadline, is_posted, context))
+
+    candidates.sort(key=lambda x: x[1])
+
+    for dt, pos, is_deadline, is_posted, context in candidates:
+        if is_deadline and deadline_at is None:
+            deadline_at = dt
+        elif is_posted and posted_at is None:
+            posted_at = dt
+        elif deadline_at is None and posted_at is None:
+            deadline_at = dt
+            break
+
+    if posted_at and not deadline_at:
+        deadline_at = posted_at + timedelta(days=30)
+
+    if not posted_at and deadline_at:
+        posted_at = deadline_at - timedelta(days=30)
+
+    return deadline_at, posted_at
+
+
+def _extract_salary(text: str) -> str:
+    text_lower = text.lower()
+
+    salary_patterns = [
+        r"연봉\s*[\d,\.]+\s*만원",
+        r"연봉\s*[\d,\.]+\s*억",
+        r"연봉\s*협의",
+        r"급여\s*[\d,\.]+\s*만원",
+        r"급여\s*협의",
+        r"월급\s*[\d,\.]+\s*만원",
+        r"보상\s*[\d,\.]+\s*만원",
+        r"연봉[\s:]*[\d,\.]+\s*(?:만원|억)",
+        r"[\d,\.]+\s*만원(?:以上|이상)?",
+        r"[\d,\.]+\s*억(?:以上|이상)?",
+    ]
+
+    for pattern in salary_patterns:
+        m = re.search(pattern, text_lower)
+        if m:
+            return m.group(0)[:255]
+
+    if "연봉 협의" in text_lower or "급여 협의" in text_lower:
+        return "협의"
+
+    return ""
+
 
 @lru_cache()
 def _get_zero_shot_classifier():
@@ -20,20 +142,16 @@ def _get_zero_shot_classifier():
         "zero-shot-classification",
         model=model,
         tokenizer=tokenizer,
-        device=-1,  # CPU, GPU 쓰면 0으로 설정
+        device=-1,
     )
     return clf
 
 
 def is_job_posting(text: str, threshold: float = 0.65) -> bool:
-    """
-    주어진 텍스트가 '채용공고'일 확률이 충분히 높은지 판단.
-    GPU 없으면 조금 느릴 수 있지만, 후보 페이지만 넣으므로 감당 가능한 수준.
-    """
     if not text:
         return False
 
-    snippet = text[:2000]  # 너무 길면 자르고
+    snippet = text[:2000]
     clf = _get_zero_shot_classifier()
 
     labels = ["채용공고", "채용공고 아님"]
@@ -46,29 +164,101 @@ def is_job_posting(text: str, threshold: float = 0.65) -> bool:
     top_label = result["labels"][0]
     top_score = float(result["scores"][0])
 
-    # 디버깅 원하면 로그
-    # print(top_label, top_score)
-
     return (top_label == "채용공고") and (top_score >= threshold)
 
 
-def parse_job_details_with_llm(text: str, url: str = "", company_name: str = "") -> dict:
-    """
-    선택: 상세 필드 추출용 LLM.
-    지금은 placeholder로 두고, 나중에 온프레 LLM/파인튜닝 모델 붙일 때 구현.
+def parse_job_details_with_llm(
+    text: str,
+    url: str = "",
+    company_name: str = "",
+    sections: dict = None,
+    primary_text: str = None
+) -> dict:
+    if not text or len(text) < 100:
+        return {}
 
-    반환 형식 예:
-    {
-        "job_description": "...",
-        "qualifications": "...",
-        "preferred_qualifications": "...",
-        "hiring_process": "...",
-        "benefits": "...",
-        "employment_type": "...",
-        "salary": "...",
-        "location": "...",
-    }
-    """
-    # 현재는 규칙 기반 파서가 있기 때문에 여기서는 빈 dict 반환
-    # 추후 필요 시 구현
-    return {}
+    result = {}
+
+    text_combined = ' '.join(text.split())
+
+    deadline_at, posted_at = _extract_dates(text)
+    if deadline_at:
+        result["deadline_at"] = deadline_at.strftime("%Y-%m-%d")
+    if posted_at:
+        result["posted_at"] = posted_at.strftime("%Y-%m-%d")
+
+    result["salary"] = _extract_salary(text)
+
+    section_patterns = [
+        (r'📢\s*자격요건\s*📢(.+?)(?=📢|$)', 'qualifications'),
+        (r'📢\s*우대조건\s*📢(.+?)(?=📢|$)', 'preferred_qualifications'),
+        (r'📢\s*담당업무\s*📢(.+?)(?=📢|$)', 'job_description'),
+        (r'📢\s*모집직무\s*📢(.+?)(?=📢|$)', 'job_description'),
+        (r'자격요건\s*(.+?)(?=📢|우대|담당|채용절차|전형|$)', 'qualifications'),
+        (r'우대조건\s*(.+?)(?=📢|자격|담당|채용절차|전형|$)', 'preferred_qualifications'),
+        (r'담당업무\s*(.+?)(?=📢|자격|우대|채용절차|전형|$)', 'job_description'),
+        (r'모집직무\s*(.+?)(?=📢|자격|우대|채용절차|전형|$)', 'job_description'),
+    ]
+
+    for pattern, field in section_patterns:
+        m = re.search(pattern, text_combined, flags=re.DOTALL)
+        if m:
+            content = m.group(1).strip()
+            content = re.sub(r'[\-\*\•▸▶📢\s]+', ' ', content)
+            content = re.sub(r'\s+', ' ', content)
+            content = re.sub(r'조건\s*$', '', content)
+            content = re.sub(r'^조건\s+', '', content)
+            content = content.strip()
+
+            if len(content) < 10:
+                continue
+
+            if field == 'job_description' and 'job_description' not in result:
+                result['job_description'] = content[:5000]
+            elif field == 'qualifications' and 'qualifications' not in result:
+                result['qualifications'] = content[:3000]
+            elif field == 'preferred_qualifications' and 'preferred_qualifications' not in result:
+                result['preferred_qualifications'] = content[:2000]
+
+    garbage_patterns = [
+        r'면접\s*시\s*관련\s*서류',
+        r'제출\s*요청',
+        r'허위\s*사실',
+        r'채용\s*취소',
+        r'채용절차',
+        r'공정화',
+        r'제출하신\s*서류',
+        r'입사\s*시\s*제출',
+    ]
+
+    if 'preferred_qualifications' in result:
+        pref = result['preferred_qualifications']
+        for gp in garbage_patterns:
+            if re.search(gp, pref):
+                pref = re.sub(gp + r'.*?(?=\s*[📢\-\*]|$)', '', pref, flags=re.DOTALL)
+        pref = pref.strip()
+        if len(pref) < 10:
+            result['preferred_qualifications'] = ''
+        else:
+            result['preferred_qualifications'] = pref[:2000]
+
+    benefit_keywords = ["식대", "재택근무", "건강검진", "교육비", "사내스터디",
+                       "컨퍼런스참가비", "운동비", "도서구입비", "경조사비",
+                       "경조휴가", "스톡옵션", "자율출퇴근제", "상여금", "인센티브"]
+    found = [b for b in benefit_keywords if b in text]
+    if found:
+        result['benefits'] = ", ".join(sorted(set(found)))
+
+    for kw in ["서울", "경기", "인천", "부산", "대구", "대전", "광주", "울산", "세종"]:
+        if kw in text:
+            result["location"] = kw
+            break
+
+    if "정규직" in text:
+        result["employment_type"] = "정규직"
+    elif "계약직" in text:
+        result["employment_type"] = "계약직"
+    elif "인턴" in text:
+        result["employment_type"] = "인턴"
+
+    return result

@@ -1,3 +1,4 @@
+import hashlib
 import os
 import logging
 import re
@@ -56,6 +57,12 @@ BENEFIT_KEYWORDS = [
 
 def _has_digit(s: str) -> bool:
     return any(ch.isdigit() for ch in s)
+
+
+def _make_unique_post_url(base_url: str, title: str, index: int = 0) -> str:
+    title_hash = hashlib.md5(title.encode('utf-8')).hexdigest()[:8]
+    clean_url = base_url.rstrip("/")
+    return f"{clean_url}#job-{title_hash}-{index}"
 
 
 # ===== LLM/BERT 훅 (옵션) =====
@@ -442,7 +449,6 @@ class JobCollectorSpider(Spider):
 
         jobs = []
 
-        # 헤딩이 없는 경우: 페이지 전체를 하나의 공고 후보로
         if not headings:
             if len(full_text_body) >= 80 and self._accept_as_job(full_text_body):
                 sections = self.extract_all_sections(full_text_body)
@@ -455,15 +461,15 @@ class JobCollectorSpider(Spider):
                     desc = self._trim_boilerplate(full_text_body)
                 if len(desc) < 120 or not self._looks_like_job_body(desc):
                     return
+                title = self._pick_title(response)
                 jobs.append({
-                    "post_url": url,
-                    "title": self._pick_title(response),
+                    "post_url": _make_unique_post_url(url, title),
+                    "title": title,
                     "job_description": desc[:20000],
                     "location": self.extract_location(desc),
                     "benefits": self.extract_benefits(desc),
                 })
         else:
-            # 헤딩 기준으로 블록 분할
             for i, h in enumerate(headings):
                 title = " ".join(h.css("::text").getall()).strip()
                 if not title:
@@ -485,7 +491,7 @@ class JobCollectorSpider(Spider):
                     continue
 
                 jobs.append({
-                    "post_url": f"{url}#job-{i}",
+                    "post_url": _make_unique_post_url(url, title, i),
                     "title": title,
                     "job_description": self._trim_boilerplate(desc)[:20000],
                     "location": self.extract_location(desc),
@@ -507,11 +513,13 @@ class JobCollectorSpider(Spider):
 
         url = response.url.rstrip("/")
         if url in self.seen_urls:
+            logger.info("job_collector: skipping duplicate url=%s", url)
             return
         self.seen_urls.add(url)
 
         data = self.extract_job_from_detail(response, from_listing=from_listing)
         if not data:
+            logger.info("job_collector: extract_job_from_detail returned None for url=%s", url)
             return
 
         self.upsert_jobposting(data)
@@ -555,6 +563,8 @@ class JobCollectorSpider(Spider):
                 )
                 parsed = {}
 
+        deadline_at = parsed.get("deadline_at")
+        posted_at = parsed.get("posted_at")
         job_desc = parsed.get("job_description") or ""
         qualifications = parsed.get("qualifications") or ""
         preferred = parsed.get("preferred_qualifications") or ""
@@ -589,7 +599,19 @@ class JobCollectorSpider(Spider):
                     return None
 
         # Final quality gate: avoid saving pure nav/sitemap text.
-        if not job_desc or not self._looks_like_job_body(job_desc):
+        # For extracted content, be more lenient since we already have parsed fields.
+        job_desc_clean = re.sub(r"\s+", " ", job_desc).strip() if job_desc else ""
+        has_meaningful_content = len(job_desc_clean) >= 50
+        
+        # Additional check: avoid pure navigation/sitemap text
+        if has_meaningful_content:
+            bad_patterns = ["전체메뉴", "gnb", "사이트맵", "all rights reserved"]
+            if any(bad in job_desc_clean.lower() for bad in bad_patterns):
+                has_meaningful_content = False
+        
+        if not job_desc or not has_meaningful_content:
+            logger.info("job_collector: quality gate failed url=%s job_desc_len=%s", 
+                       url, len(job_desc) if job_desc else 0)
             return None
 
         if not qualifications:
@@ -633,6 +655,8 @@ class JobCollectorSpider(Spider):
             "employment_type": employment_type,
             "salary": salary,
             "location": location,
+            "deadline_at": deadline_at,
+            "posted_at": posted_at,
         }
 
     # ============== classifier 래퍼 ==============
@@ -846,6 +870,21 @@ class JobCollectorSpider(Spider):
             if hasattr(JobPosting, field) and data.get(field):
                 defaults[field] = str(data[field])[:max_len]
 
+        date_fields = ["deadline_at", "posted_at"]
+        for field in date_fields:
+            val = data.get(field)
+            if val:
+                try:
+                    if isinstance(val, str):
+                        from datetime import datetime
+                        defaults[field] = datetime.strptime(val, "%Y-%m-%d").date()
+                    elif hasattr(val, 'date'):
+                        defaults[field] = val.date()
+                    else:
+                        defaults[field] = val
+                except (ValueError, TypeError) as e:
+                    logger.debug("Could not parse date %s=%s: %s", field, val, e)
+
         obj, created = JobPosting.objects.get_or_create(
             post_url=post_url,
             defaults=defaults,
@@ -881,6 +920,26 @@ class JobCollectorSpider(Spider):
             if new_val and getattr(obj, field) != new_val[:max_len]:
                 setattr(obj, field, new_val[:max_len])
                 changed = True
+
+        for field in date_fields:
+            val = data.get(field)
+            if val:
+                try:
+                    if isinstance(val, str):
+                        from datetime import datetime
+                        new_date = datetime.strptime(val, "%Y-%m-%d").date()
+                    elif hasattr(val, 'date'):
+                        new_date = val.date()
+                    else:
+                        new_date = val
+
+                    current = getattr(obj, field, None)
+                    if current != new_date:
+                        setattr(obj, field, new_date)
+                        changed = True
+                        logger.info("job_collector: updating date field %s from %s to %s", field, current, new_date)
+                except (ValueError, TypeError) as e:
+                    logger.debug("Date parse error for %s: %s", field, e)
 
         if obj.status != "active":
             obj.status = "active"
