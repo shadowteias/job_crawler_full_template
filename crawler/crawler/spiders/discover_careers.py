@@ -554,23 +554,6 @@ class DiscoverCareersSpider(Spider):
                 )
                 return
 
-        # ===== Negative Keywords Detection & Alternative Links =====
-        text = self._get_text(response)
-        has_negative = self.has_negative_keywords(text)
-        
-        # If negative keywords found, try to find alternative job links
-        if has_negative:
-            logger.info("[discover] Negative keywords detected, looking for alternatives: %s", url)
-            alt_links = self.find_alternative_job_links(response)
-            for alt_url in alt_links:
-                if alt_url not in self.visited and self.is_same_domain(alt_url):
-                    logger.info("[discover] Following alternative: %s", alt_url)
-                    self.visited.add(alt_url)
-                    yield Request(url=alt_url, callback=self.parse_page, meta={"depth": depth + 1}, dont_filter=True)
-                    return
-            logger.info("[discover] No alternative found, continuing search")
-
-
         # 1) 외부 채용 플랫폼 링크가 이 페이지 안에 하나라도 있으면:
         #    - 이 페이지를 외부 채용 연동 페이지로 인정하고 종료
         if self.contains_external_job_link(response):
