@@ -427,7 +427,7 @@ docker compose exec app python -m unittest tests.test_spiders -v
 
 ## 6. 주요 개선 사항 (최근 작업)
 
-### 6.1Alive 필터 추가 (`api/tasks.py`)
+### 6.1 Alive 필터 추가 (`api/tasks.py`)
 - `run_discover_careers_spiders()`에서 `homepage_url_status='alive'` 또는 2xx/3xx 상태 코드 필터 추가
 
 ### 6.2 텍스트 vs 이미지 Detection (`discover_careers.py`)
@@ -445,6 +445,31 @@ docker compose exec app python -m unittest tests.test_spiders -v
 ### 6.5 외부 플랫폼 처리 개선 (`job_collector.py`)
 - 외부 플랫폼 링크가 footer에 있는 것만 무시
 - 페이지 자체가 외부 플랫폼일 때만 중단
+
+### 6.6 로컬 LLM 통합 (2026)
+- `api/llm_parser.py`: LLM 기반 콘텐츠 추출
+- `requirements.txt`: torch, transformers, llama-cpp-python 추가
+- `Dockerfile`: llama-cpp-python 및 Qwen2.5 GGUF 모델 추가
+- 로컬 LLM으로 구조화된 채용 정보 추출
+
+### 6.7 날짜 추출 기능
+- `llm_parser.py`: `_extract_dates()` 함수
+- 한국어 날짜 패턴 지원 (2026.04.02, 2026년 04월 02일, 26년 04월 02일)
+- `deadline_at`, `posted_at` 필드 추출
+
+### 6.8 급여 추출 기능
+- `llm_parser.py`: `_extract_salary()` 함수
+- 연봉, 월급, 급여 패턴 매칭
+
+### 6.9 post_url 고유성 개선
+- `job_collector.py`: `_make_unique_post_url()` 함수 추가
+- 각 채용 공고별 고유 URL 생성 (#job-{md5_hash}-{index})
+
+### 6.10 Celery 태스크 통합
+- `api/tasks.py`: LLM 기반 콘텐츠 추출 태스크 추가
+- `crawl_company_careers`: 여러 회사 채용 페이지 크롤링
+- `crawl_single_company_career`: 개별 회사 크롤링
+- `extract_job_content`: 로컬 LLM으로 콘텐츠 추출
 
 ---
 
