@@ -1,5 +1,6 @@
 from django.db import models
 from datetime import datetime
+import re
 
 # inspectdb로 자동 생성된 모델을 Django 관례에 맞게 수정한 최종 버전입니다.
 
