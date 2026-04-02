@@ -10,7 +10,8 @@ from django.views.decorators.http import require_POST
 from .matching import top_jobs_for_student, top_students_for_company, batch_match
 
 def _auth_ok(request) -> bool:
-    return request.headers.get("X-API-KEY") == getattr(settings, "API_INTERNAL_TOKEN", None)
+    token = request.headers.get("X-Internal-Token") or request.headers.get("X-API-KEY")
+    return token == getattr(settings, "API_INTERNAL_TOKEN", None)
 
 @csrf_exempt
 @require_POST

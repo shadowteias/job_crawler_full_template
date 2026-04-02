@@ -168,6 +168,11 @@
 - 모든 컨테이너(app/worker/beat)에 `.env`가 주입된다(`docker-compose.yml`의 `env_file`).
 - 키 수정 후에는 worker/beat를 재시작(필요 시 force-recreate)해야 반영되는 경우가 있다.
 
+### 내부 API 인증 헤더
+- 내부 관리/운영성 API는 `X-Internal-Token` 을 기준 헤더로 사용한다.
+- 일부 기존 엔드포인트는 하위 호환을 위해 `X-API-KEY` 또는 `Authorization: Bearer ...` 도 허용할 수 있다.
+- 새로 붙이는 내부 호출 코드는 가능하면 `X-Internal-Token` 기준으로 맞춘다.
+
 ### DART
 - `OPENDART_API_KEY=...`
 
@@ -189,6 +194,9 @@
   - `python manage.py shell -c "from api.models import Company; print(Company.objects.count())"`
 - DART 상장사 보강 여부:
   - `python manage.py shell -c "from api.models import Company; print(Company.objects.exclude(stock_code__isnull=True).exclude(stock_code='').count())"`
+- 특정 회사 ID 범위만 부분 실행할 때:
+  - `check_company_homepages`, `find_missing_homepages`, `run_discover_careers_spiders`, `run_job_collector_spiders` 는 `company_id_start`, `company_id_end` 인자를 받을 수 있다.
+  - 운영 기본 스케줄은 기존처럼 전체/limit 기준으로 동작하므로 주기 실행 동작은 그대로 유지된다.
 
 ---
 
