@@ -700,6 +700,14 @@ def _probe_url(session: requests.Session, url: str, timeout: float = 10.0) -> Tu
         return "dead", None
 
 
+def _apply_company_id_range(qs, company_id_start: Optional[int] = None, company_id_end: Optional[int] = None):
+    if company_id_start is not None:
+        qs = qs.filter(id__gte=int(company_id_start))
+    if company_id_end is not None:
+        qs = qs.filter(id__lte=int(company_id_end))
+    return qs
+
+
 @shared_task(name="api.tasks.check_company_homepages")
 def check_company_homepages(
     *,
@@ -708,6 +716,8 @@ def check_company_homepages(
     skip_recent_days: int = 365,
     request_timeout: float = 10.0,
     max_fail_before_dead: int = 2,
+    company_id_start: Optional[int] = None,
+    company_id_end: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
     homepage_url 생존 여부를 체크해서 homepage_url_status를 갱신.
@@ -716,6 +726,7 @@ def check_company_homepages(
     - max_fail_before_dead: 연속 실패가 이 값 이상이면 dead 확정
     """
     qs = Company.objects.exclude(homepage_url__isnull=True).exclude(homepage_url="")
+    qs = _apply_company_id_range(qs, company_id_start=company_id_start, company_id_end=company_id_end)
 
     if skip_dead:
         qs = qs.exclude(homepage_url_status="dead")
@@ -787,6 +798,8 @@ def check_company_homepages(
         "updated": updated,
         "skip_dead": skip_dead,
         "skip_recent_days": skip_recent_days,
+        "company_id_start": company_id_start,
+        "company_id_end": company_id_end,
     }
 
 

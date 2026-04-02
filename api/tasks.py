@@ -14,17 +14,28 @@ from django.conf import settings
 from .models import Company
 from .utils import find_homepage_for_company
 from .osm_overpass import iter_region_records
-
-# 추가 회사 데이터 소스 2종 (SWDB, DART(company.json) ) 추가용 코드 import
-from .company_sources import *  # noqa: F401,F403
-# 추가 회사 데이터 소스 2종 추가용 코드
-from . import company_sources  # noqa: F401
+from .company_sources import (
+    collect_swdb_companies,
+    collect_dart_companies,
+    check_company_homepages,
+    setup_company_seed_schedules,
+)
 
 
 logger = logging.getLogger(__name__)
 FILTER_VERSION = "2026-02-02-is_target_industry-v2"
+DISCOVER_SPIDER_TIMEOUT = 120
+JOB_COLLECTOR_TIMEOUT = 300
 
 BASE_DIR = settings.BASE_DIR
+
+
+def _apply_company_id_range(qs, company_id_start=None, company_id_end=None):
+    if company_id_start is not None:
+        qs = qs.filter(id__gte=int(company_id_start))
+    if company_id_end is not None:
+        qs = qs.filter(id__lte=int(company_id_end))
+    return qs
 
 # =========================
 # 0) 공통 유틸: URL / 이름 정규화
@@ -497,12 +508,13 @@ def collect_osm_companies(
 # =========================
 
 @shared_task
-def find_missing_homepages(limit=None):
+def find_missing_homepages(limit=None, company_id_start=None, company_id_end=None):
     """
     homepage_url 이 비어있는 회사들에 대해 검색으로 홈페이지를 찾아 채워 넣는다.
     limit: 개발 단계에서 상위 N개만 시도하고 싶을 때 사용 (None이면 전체)
     """
     qs_all = Company.objects.filter(homepage_url__isnull=True).order_by("id")
+    qs_all = _apply_company_id_range(qs_all, company_id_start=company_id_start, company_id_end=company_id_end)
     total_all = qs_all.count()
 
     if limit:
@@ -514,10 +526,12 @@ def find_missing_homepages(limit=None):
     updated = 0
 
     logger.info(
-        "find_missing_homepages: start (targets=%s/%s, limit=%s)",
+        "find_missing_homepages: start (targets=%s/%s, limit=%s, company_id_start=%s, company_id_end=%s)",
         total,
         total_all,
         limit,
+        company_id_start,
+        company_id_end,
     )
 
     for company in qs:
@@ -537,7 +551,7 @@ def find_missing_homepages(limit=None):
 
 
 @shared_task
-def run_discover_careers_spiders(limit=None):
+def run_discover_careers_spiders(limit=None, company_id_start=None, company_id_end=None):
     """
     homepage_url은 있지만 recruits_url이 없는 회사들에 대해
     discover_careers 스파이더를 실행.
@@ -560,9 +574,19 @@ def run_discover_careers_spiders(limit=None):
         .filter(Q(recruits_url__isnull=True) | Q(recruits_url=""))
         .order_by("id")
     )
+    qs = _apply_company_id_range(qs, company_id_start=company_id_start, company_id_end=company_id_end)
 
     if limit:
         qs = qs[:int(limit)]
+
+    total = qs.count()
+    logger.info(
+        "run_discover_careers_spiders: start (targets=%s, limit=%s, company_id_start=%s, company_id_end=%s)",
+        total,
+        limit,
+        company_id_start,
+        company_id_end,
+    )
 
     for company in qs:
         close_old_connections()
@@ -588,7 +612,15 @@ def run_discover_careers_spiders(limit=None):
                 capture_output=True,
                 text=True,
                 check=False,
+                timeout=DISCOVER_SPIDER_TIMEOUT,
             )
+        except subprocess.TimeoutExpired:
+            logger.warning(
+                "run_discover_careers_spiders: spider timed out for company_id=%s (timeout=%ss)",
+                company_id,
+                DISCOVER_SPIDER_TIMEOUT,
+            )
+            continue
         except Exception as e:
             logger.warning(
                 "run_discover_careers_spiders: failed to start spider for company_id=%s (%s)",
@@ -615,7 +647,7 @@ def run_discover_careers_spiders(limit=None):
 
 
 @shared_task
-def run_discover_careers_spiders_concurrent(limit=None, workers=20):
+def run_discover_careers_spiders_concurrent(limit=None, workers=20, company_id_start=None, company_id_end=None):
     """
     Concurrent version of run_discover_careers_spiders.
     Runs multiple spider subprocesses in parallel using ThreadPoolExecutor.
@@ -638,6 +670,7 @@ def run_discover_careers_spiders_concurrent(limit=None, workers=20):
         .order_by("id")
         .values_list("id", "homepage_url")
     )
+    qs = _apply_company_id_range(qs, company_id_start=company_id_start, company_id_end=company_id_end)
 
     if limit:
         qs = list(qs[: int(limit)])
@@ -661,11 +694,11 @@ def run_discover_careers_spiders_concurrent(limit=None, workers=20):
                 capture_output=True,
                 text=True,
                 check=False,
-                timeout=120,
+                timeout=DISCOVER_SPIDER_TIMEOUT,
             )
             return company_id, result.returncode == 0, homepage_url
         except subprocess.TimeoutExpired:
-            logger.warning("Spider timed out for company_id=%s", company_id)
+            logger.warning("Spider timed out for company_id=%s (timeout=%ss)", company_id, DISCOVER_SPIDER_TIMEOUT)
             return company_id, False, homepage_url
         except Exception as e:
             logger.warning("Spider failed for company_id=%s (%s)", company_id, e)
@@ -706,7 +739,7 @@ def run_discover_careers_spiders_concurrent(limit=None, workers=20):
 
 
 @shared_task
-def run_job_collector_spiders(limit=None):
+def run_job_collector_spiders(limit=None, company_id_start=None, company_id_end=None):
     """
     recruits_url이 있고 회사들에 대해 job_collector 스파이더를 실행.
     """
@@ -715,9 +748,19 @@ def run_job_collector_spiders(limit=None):
     ).exclude(
         recruits_url=""
     ).order_by("id")
+    qs = _apply_company_id_range(qs, company_id_start=company_id_start, company_id_end=company_id_end)
 
     if limit:
         qs = qs[:int(limit)]
+
+    total = qs.count()
+    logger.info(
+        "run_job_collector_spiders: start (targets=%s, limit=%s, company_id_start=%s, company_id_end=%s)",
+        total,
+        limit,
+        company_id_start,
+        company_id_end,
+    )
 
     base_env = os.environ.copy()
 
@@ -751,7 +794,15 @@ def run_job_collector_spiders(limit=None):
                 capture_output=True,
                 text=True,
                 check=False,
+                timeout=JOB_COLLECTOR_TIMEOUT,
             )
+        except subprocess.TimeoutExpired:
+            logger.warning(
+                "run_job_collector_spiders: spider timed out for company_id=%s (timeout=%ss)",
+                company_id,
+                JOB_COLLECTOR_TIMEOUT,
+            )
+            continue
         except Exception as e:
             logger.warning(
                 "run_job_collector_spiders: failed to start spider for company_id=%s (%s)",
@@ -778,7 +829,7 @@ def run_job_collector_spiders(limit=None):
 
 
 @shared_task
-def run_job_collector_spiders_concurrent(limit=None, workers=10):
+def run_job_collector_spiders_concurrent(limit=None, workers=10, company_id_start=None, company_id_end=None):
     """
     Concurrent version of run_job_collector_spiders.
     Runs multiple job_collector spider subprocesses in parallel using ThreadPoolExecutor.
@@ -791,6 +842,7 @@ def run_job_collector_spiders_concurrent(limit=None, workers=10):
         .order_by("id")
         .values_list("id", "recruits_url", "page_type", "post_type")
     )
+    qs = _apply_company_id_range(qs, company_id_start=company_id_start, company_id_end=company_id_end)
 
     if limit:
         qs = list(qs[: int(limit)])
@@ -819,11 +871,11 @@ def run_job_collector_spiders_concurrent(limit=None, workers=10):
                 capture_output=True,
                 text=True,
                 check=False,
-                timeout=300,
+                timeout=JOB_COLLECTOR_TIMEOUT,
             )
             return company_id, result.returncode == 0, recruits_url
         except subprocess.TimeoutExpired:
-            logger.warning("job_collector timed out for company_id=%s", company_id)
+            logger.warning("job_collector timed out for company_id=%s (timeout=%ss)", company_id, JOB_COLLECTOR_TIMEOUT)
             return company_id, False, recruits_url
         except Exception as e:
             logger.warning("job_collector failed for company_id=%s (%s)", company_id, e)
