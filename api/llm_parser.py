@@ -1,10 +1,16 @@
 # api/llm_parser.py
+"""
+LLM-based job posting parser with Zero-shot classification + LLM post-processing.
+Korean and English only. Designed for matching system compatibility.
+"""
 
 import os
 import re
+import json
 import logging
 from datetime import datetime, timedelta
 from functools import lru_cache
+from typing import Dict, List, Optional, Tuple
 
 from transformers import AutoTokenizer, AutoModelForSequenceClassification, pipeline
 
@@ -15,26 +21,83 @@ JOB_CLASSIFIER_MODEL = os.getenv(
     "joeddav/xlm-roberta-large-xnli"
 )
 
-SECTION_HEADERS = [
-    "주요 업무", "담당 업무", "담당 역할", "주요업무",
-    "자격 요건", "자격요건", "필수 요건",
-    "우대 사항", "우대사항", "우대 조건", "우대조건",
-    "전형 절차", "채용 절차", "전형절차",
-    "복리후생", "복리 후생", "혜택",
-    "근무조건", "근무 조건", "고용 형태",
-    "급여", "연봉", "급여조건",
-    "근무지", "근무 장소", "근무지역",
+# SECTION LABELS (Korean + English only)
+SECTION_LABELS = [
+    "주요 업무",
+    "담당 업무",
+    "담당 역할",
+    "주요업무",
+    "Main Duties",
+    "What you will do",
+    "Responsibilities",
+    "자격 요건",
+    "자격요건",
+    "필수 요건",
+    "Requirements",
+    "Qualifications",
+    "Must have",
+    "우대 사항",
+    "우대사항",
+    "우대 조건",
+    "우대조건",
+    "Preferred",
+    "Nice to have",
+    "전형 절차",
+    "채용 절차",
+    "전형절차",
+    "Process",
+    "복리후생",
+    "복리 후생",
+    "혜택",
+    "Benefits",
+    "Welfare",
+    "근무조건",
+    "근무 조건",
+    "고용 형태",
+    "Employment Type",
+    "급여",
+    "연봉",
+    "급여조건",
+    "Salary",
+    "근무지",
+    "근무 장소",
+    "근무지역",
+    "Location",
 ]
 
+# Stop headers to avoid
 SECTION_STOP_HEADERS = [
-    "개인정보처리방침", "이용약관", "쿠키", "Copyright",
-    "채용공고", "모집요강", "지원하기", "apply",
+    "개인정보처리방침",
+    "이용약관",
+    "쿠키",
+    "Copyright",
+    "채용공고",
+    "모집요강",
+    "지원하기",
+    "apply",
 ]
 
-NEXT_SECTION_MARKERS = [
-    "📢", "자격요건", "우대조건", "담당업무", "모집직무",
-    "채용절차", "전형절차", "복리후생", "지원방법",
+# Welfare keywords for matching system (normalized)
+WELFARE_CANON = {
+    "식대", "재택근무", "건강검진", "교육비", "사내스터디", "컨퍼런스참가비",
+    "운동비", "도서구입비", "경조사비", "경조휴가", "스톡옵션", "자율출퇴근제",
+    "상여금", "인센티브", "연차수당", "퇴직금",
+}
+
+# Location keywords
+LOCATION_KEYWORDS = [
+    "서울", "경기", "인천", "부산", "대구", "대전", "광주", "울산", "세종",
+    "충북", "충남", "전북", "전남", "경북", "경남", "강원", "제주",
+    "수도권", "지방",
 ]
+
+# Employment type keywords
+EMPLOYMENT_TYPE_KEYWORDS = {
+    "정규직": ["정규직", "정규 채용", "permanent", "정식 채용"],
+    "계약직": ["계약직", "계약 채용", "계약", "contract"],
+    "인턴": ["인턴", "인턴십", "intern"],
+    "파트타임": ["파트타임", "아르바이트", "part-time", "시간제"],
+}
 
 
 def _parse_date(year_str: str, month_str: str, day_str: str) -> datetime:
@@ -167,6 +230,101 @@ def is_job_posting(text: str, threshold: float = 0.65) -> bool:
     return (top_label == "채용공고") and (top_score >= threshold)
 
 
+def _classify_sections_with_zero_shot(text: str) -> dict:
+    if not text or len(text) < 100:
+        return {}
+    
+    text_combined = ' '.join(text.split())
+    
+    paragraphs = re.split(r'\n\n|\n(?=[^\s])|\t', text_combined)
+    paragraphs = [p.strip() for p in paragraphs if len(p.strip()) > 50]
+    
+    if not paragraphs:
+        return {}
+    
+    candidate_labels = [
+        "주요 업무",
+        "자격 요건",
+        "우대 사항",
+        "전형 절차",
+        "복리후생",
+        "근무조건",
+    ]
+    
+    clf = _get_zero_shot_classifier()
+    
+    section_contents = {label: [] for label in candidate_labels}
+    section_contents["기타"] = []
+    
+    for para in paragraphs:
+        if len(para) < 30:
+            continue
+        
+        try:
+            result = clf(para[:500], candidate_labels=candidate_labels, multi_label=False)
+            top_label = result["labels"][0]
+            top_score = float(result["scores"][0])
+            
+            if top_score >= 0.3:
+                section_contents[top_label].append(para)
+            else:
+                section_contents["기타"].append(para)
+        except Exception:
+            section_contents["기타"].append(para)
+    
+    result = {}
+    
+    if section_contents.get("주요 업무"):
+        combined = "\n".join(section_contents["주요 업무"])
+        result["job_description"] = combined[:5000]
+    
+    if section_contents.get("자격 요건"):
+        combined = "\n".join(section_contents["자격 요건"])
+        result["qualifications"] = combined[:3000]
+    
+    if section_contents.get("우대 사항"):
+        combined = "\n".join(section_contents["우대 사항"])
+        result["preferred_qualifications"] = combined[:2000]
+    
+    if section_contents.get("전형 절차"):
+        combined = "\n".join(section_contents["전형 절차"])
+        result["hiring_process"] = combined[:5000]
+    
+    if section_contents.get("복리후생"):
+        combined = "\n".join(section_contents["복리후생"])
+        result["benefits"] = combined[:5000]
+    
+    if section_contents.get("근무조건"):
+        combined = "\n".join(section_contents["근무조건"])
+        result["work_conditions"] = combined[:5000]
+    
+    return result
+
+
+def _normalize_welfare(text: str) -> str:
+    found = []
+    text_lower = text.lower()
+    for wf in WELFARE_CANON:
+        if wf.lower() in text_lower:
+            found.append(wf)
+    return ", ".join(sorted(set(found)))
+
+
+def _normalize_location(text: str) -> str:
+    for loc in LOCATION_KEYWORDS:
+        if loc in text:
+            return loc
+    return ""
+
+
+def _normalize_employment_type(text: str) -> str:
+    for emp_type, keywords in EMPLOYMENT_TYPE_KEYWORDS.items():
+        for kw in keywords:
+            if kw in text:
+                return emp_type
+    return ""
+
+
 def parse_job_details_with_llm(
     text: str,
     url: str = "",
@@ -189,25 +347,26 @@ def parse_job_details_with_llm(
 
     result["salary"] = _extract_salary(text)
 
+    zero_shot_sections = _classify_sections_with_zero_shot(text)
+    for key, value in zero_shot_sections.items():
+        if key not in result:
+            result[key] = value
+
     section_patterns = [
-        (r'📢\s*자격요건\s*📢(.+?)(?=📢|$)', 'qualifications'),
-        (r'📢\s*우대조건\s*📢(.+?)(?=📢|$)', 'preferred_qualifications'),
-        (r'📢\s*담당업무\s*📢(.+?)(?=📢|$)', 'job_description'),
-        (r'📢\s*모집직무\s*📢(.+?)(?=📢|$)', 'job_description'),
-        (r'자격요건\s*(.+?)(?=📢|우대|담당|채용절차|전형|$)', 'qualifications'),
-        (r'우대조건\s*(.+?)(?=📢|자격|담당|채용절차|전형|$)', 'preferred_qualifications'),
-        (r'담당업무\s*(.+?)(?=📢|자격|우대|채용절차|전형|$)', 'job_description'),
-        (r'모집직무\s*(.+?)(?=📢|자격|우대|채용절차|전형|$)', 'job_description'),
+        (r'자격요건\s*(.+?)(?=우대|담당|채용절차|전형|$)', 'qualifications'),
+        (r'우대조건\s*(.+?)(?=자격|담당|채용절차|전형|$)', 'preferred_qualifications'),
+        (r'담당업무\s*(.+?)(?=자격|우대|채용절차|전형|$)', 'job_description'),
+        (r'주요\s*업무\s*(.+?)(?=자격|우대|채용절차|전형|$)', 'job_description'),
+        (r'자격\s*요건\s*(.+?)(?=우대|담당|채용절차|전형|$)', 'qualifications'),
     ]
 
     for pattern, field in section_patterns:
         m = re.search(pattern, text_combined, flags=re.DOTALL)
         if m:
             content = m.group(1).strip()
-            content = re.sub(r'[\-\*\•▸▶📢\s]+', ' ', content)
+            content = re.sub(r'[\-\*\•▸▶\s]+', ' ', content)
             content = re.sub(r'\s+', ' ', content)
             content = re.sub(r'조건\s*$', '', content)
-            content = re.sub(r'^조건\s+', '', content)
             content = content.strip()
 
             if len(content) < 10:
@@ -235,30 +394,15 @@ def parse_job_details_with_llm(
         pref = result['preferred_qualifications']
         for gp in garbage_patterns:
             if re.search(gp, pref):
-                pref = re.sub(gp + r'.*?(?=\s*[📢\-\*]|$)', '', pref, flags=re.DOTALL)
+                pref = re.sub(gp + r'.*?(?=\s*[^\s]|$)', '', pref, flags=re.DOTALL)
         pref = pref.strip()
         if len(pref) < 10:
             result['preferred_qualifications'] = ''
         else:
             result['preferred_qualifications'] = pref[:2000]
 
-    benefit_keywords = ["식대", "재택근무", "건강검진", "교육비", "사내스터디",
-                       "컨퍼런스참가비", "운동비", "도서구입비", "경조사비",
-                       "경조휴가", "스톡옵션", "자율출퇴근제", "상여금", "인센티브"]
-    found = [b for b in benefit_keywords if b in text]
-    if found:
-        result['benefits'] = ", ".join(sorted(set(found)))
-
-    for kw in ["서울", "경기", "인천", "부산", "대구", "대전", "광주", "울산", "세종"]:
-        if kw in text:
-            result["location"] = kw
-            break
-
-    if "정규직" in text:
-        result["employment_type"] = "정규직"
-    elif "계약직" in text:
-        result["employment_type"] = "계약직"
-    elif "인턴" in text:
-        result["employment_type"] = "인턴"
+    result['benefits'] = _normalize_welfare(text)
+    result['location'] = _normalize_location(text)
+    result['employment_type'] = _normalize_employment_type(text)
 
     return result
