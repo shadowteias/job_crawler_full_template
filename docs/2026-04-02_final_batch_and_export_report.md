@@ -163,3 +163,90 @@
 3. CSV 활용성을 실제로 보장하는 export 로직을 추가함
 
 남은 과제는 **공고 저장량 확대**보다 **파싱 품질 개선** 쪽이 더 중요하다.
+
+---
+
+## 9. 2026-04-07 보수적 discovery 최적화 및 추가 검증
+
+### 적용한 최적화
+
+`crawler/crawler/spiders/discover_careers.py` 에서 정확도에 영향을 주지 않는 보수적 최적화만 적용했다.
+
+1. response 단위 anchor cache 추가
+   - 같은 페이지에서 `<a>` 태그를 여러 번 다시 순회하지 않도록 `href`, `full_url`, `text`, `label`, `combined_lower` 를 한 번만 구성해서 재사용
+   - 적용 대상:
+     - `find_direct_recruit_link()`
+     - `contains_external_job_link()`
+     - `select_candidate_links()`
+     - `find_alternative_job_links()`
+     - `looks_like_listing()`
+
+2. response 단위 text cache 추가
+   - `_get_text()` 와 `_get_visible_text()` 의 결과를 response 기준으로 캐시해서 재사용
+
+3. `looks_like_listing()` 조기 종료
+   - listing 판정 threshold(`depth=0 -> 5`, `depth>=1 -> 3`)를 넘는 순간 바로 `True` 반환
+   - threshold를 넘은 뒤에도 남은 링크를 계속 스캔하던 비용 제거
+
+4. `detect_post_type()` 조기 종료
+   - `visible_text` 길이가 `500` 이상이면 기존 로직상 어차피 `text` 이므로, poster image 스캔 전에 바로 `"text"` 반환
+
+이 변경들은 keyword, threshold, depth, 분기 조건 자체를 바꾸지 않고 **중복 파싱 비용만 줄이도록** 설계했다.
+
+### 검증
+
+- `python3 -m py_compile crawler/crawler/spiders/discover_careers.py` 통과
+- `python3 -m unittest tests.test_spiders` 통과 (`34 tests OK`)
+
+### 추가 실배치 테스트 범위
+
+이전까지 테스트하지 않았던 범위에서 약 30분 분량에 해당하는 구간으로 아래 범위를 선택했다.
+
+- `Company.id 23000~24099`
+- 총 `1100`개 회사
+- 실행 설정:
+  - `workers=2`
+  - `chunk_size=50`
+  - `sleep_seconds=0.5`
+
+### 단계별 결과
+
+#### 1) 홈페이지 생존 확인
+
+- 대상 회사 수: `1100`
+- `alive`: `481`
+- `dead`: `15`
+- 기타 상태: `604`
+
+#### 2) 구인페이지 탐색(discovery)
+
+- discovery 대상 수: `485`
+- `saved`: `485`
+- `failed`: `0`
+
+#### 3) 구인정보 크롤링(collector)
+
+- collector 대상 수: `62`
+- `completed`: `62`
+- `failed`: `0`
+
+#### 4) 최종 결과물
+
+- `recruits_url` 확보 회사 수: `62`
+- `JobPosting` 저장 수: `98`
+
+### 소요 시간
+
+청크 로그 기준 누적 시간:
+
+- discovery 합계: `1055.35초` (약 `17분 35초`)
+- collector 합계: `453.92초` (약 `7분 34초`)
+- 합계: `1509.27초` (약 `25분 9초`)
+
+즉, 목표했던 “약 30분 정도 작업시간”에 맞는 규모로 실제 검증을 마쳤다.
+
+### 해석
+
+- 이번 추가 범위에서는 discovery/collector 모두 `failed=0` 이었다.
+- 컨테이너도 작업 종료 후 계속 `Up` 상태를 유지했다.
+- 따라서 이번 보수적 최적화는 적어도 이 추가 실배치 범위에서는 **정확도를 떨어뜨리는 징후 없이, 안정적으로 동작**했다고 판단할 수 있다.
