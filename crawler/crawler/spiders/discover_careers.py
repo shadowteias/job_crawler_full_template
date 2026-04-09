@@ -519,6 +519,7 @@ class DiscoverCareersSpider(Spider):
 
         self.max_depth = 4
         self.visited = set()
+        self._response_cache = {}
 
     # Scrapy 2.13 경고 회피 위해 start_requests 유지 (하위호환),
     # 필요시 start() 도입 가능.
@@ -611,6 +612,45 @@ class DiscoverCareersSpider(Spider):
 
     # ===== 선택 엔진 =====
 
+    def _get_response_cache(self, response):
+        cache = self._response_cache.get(response.url)
+        if cache is None:
+            cache = {}
+            self._response_cache[response.url] = cache
+        return cache
+
+    def _get_anchor_data(self, response):
+        cache = self._get_response_cache(response)
+        if "anchors" in cache:
+            return cache["anchors"]
+
+        anchors = []
+        for link in response.css("a"):
+            href = (link.attrib.get("href") or "").strip()
+            text = " ".join(link.css("::text").getall()).strip()
+            label_parts = [
+                link.attrib.get("title"),
+                link.attrib.get("aria-label"),
+            ]
+            label = " ".join(filter(None, label_parts)).strip()
+            full_url = response.urljoin(href) if href else ""
+
+            anchors.append(
+                {
+                    "href": href,
+                    "full_url": full_url,
+                    "text": text,
+                    "text_lower": text.lower(),
+                    "label": label,
+                    "label_lower": label.lower(),
+                    "combined": f"{text} {label}".strip(),
+                    "combined_lower": f"{text.lower()} {label.lower()}".strip(),
+                }
+            )
+
+        cache["anchors"] = anchors
+        return anchors
+
     def select_candidate_links(self, response):
         """
         PRIORITY_KEYWORDS 가 텍스트/레이블에 포함된 링크만 후보로 사용.
@@ -618,23 +658,16 @@ class DiscoverCareersSpider(Spider):
         """
         candidates = []
 
-        for link in response.css("a"):
-            href = (link.attrib.get("href") or "").strip()
+        for anchor in self._get_anchor_data(response):
+            href = anchor["href"]
             if not href:
                 continue
 
-            text = " ".join(link.css("::text").getall()).strip()
-            label_parts = [
-                link.attrib.get("title"),
-                link.attrib.get("aria-label"),
-            ]
-            label = " ".join(filter(None, label_parts)).strip()
-
-            score = self.score_link_text(text, label)
+            score = self.score_link_text(anchor["text"], anchor["label"])
             if score <= 0:
                 continue
 
-            full_url = response.urljoin(href)
+            full_url = anchor["full_url"]
             if full_url in self.visited:
                 continue
 
@@ -685,18 +718,12 @@ class DiscoverCareersSpider(Spider):
         ]
         
         candidates = []
-        for link in response.css("a"):
-            href = (link.attrib.get("href") or "").strip()
+        for anchor in self._get_anchor_data(response):
+            href = anchor["href"]
             if not href or href.startswith("#") or href.lower().startswith("javascript:"):
                 continue
-            
-            text = " ".join(link.css("::text").getall()).strip().lower()
-            label = " ".join(filter(None, [
-                link.attrib.get("title"),
-                link.attrib.get("aria-label"),
-            ])).strip().lower()
-            
-            combined = f"{text} {label}"
+
+            combined = anchor["combined_lower"]
             
             # Skip if contains avoid keywords
             if any(kw.lower() in combined for kw in AVOID_KEYWORDS):
@@ -704,7 +731,7 @@ class DiscoverCareersSpider(Spider):
             
             # Check if contains positive job keywords
             if any(kw.lower() in combined for kw in POSITIVE_JOB_KEYWORDS):
-                full_url = response.urljoin(href)
+                full_url = anchor["full_url"]
                 if full_url not in candidates:
                     candidates.append(full_url)
         
@@ -717,8 +744,8 @@ class DiscoverCareersSpider(Spider):
         wanted/saramin/jobkorea 등으로 향하는 링크가 하나라도 있으면 True.
         그 경우: '탐색 대상 아님' → 현재 페이지를 외부 연동 채용 페이지로 간주.
         """
-        for href in response.css("a::attr(href)").getall():
-            href = (href or "").strip()
+        for anchor in self._get_anchor_data(response):
+            href = anchor["href"]
             if not href:
                 continue
             lower = href.lower()
@@ -740,40 +767,37 @@ class DiscoverCareersSpider(Spider):
         from collections import Counter
 
         job_links = []
+        threshold = 5 if depth == 0 else 3
+        counts = Counter()
 
-        for a in response.css("a"):
-            href = (a.attrib.get("href") or "").strip()
+        for anchor in self._get_anchor_data(response):
+            href = anchor["href"]
             if not href:
                 continue
 
-            link_text = " ".join(a.css("::text").getall()).strip().lower()
-            label = " ".join(filter(None, [
-                a.attrib.get("title"),
-                a.attrib.get("aria-label"),
-            ])).strip().lower()
-
-            combined = f"{link_text} {label}"
+            combined = anchor["combined_lower"]
 
             # PRIORITY_KEYWORDS 중 하나라도 포함된 링크만 "채용 관련 링크"로 본다
             if any(kw.lower() in combined for kw in PRIORITY_KEYWORDS):
-                full = urlparse(response.urljoin(href))
+                full = urlparse(anchor["full_url"])
                 # 쿼리/fragment 제거한 상위 path 기준으로 패턴 묶기
                 norm_path = full.path.rsplit("/", 2)[0]
                 job_links.append(norm_path)
+                counts[norm_path] += 1
+                if counts[norm_path] >= threshold:
+                    return True
 
         if not job_links:
             return False
-
-        counts = Counter(job_links)
         max_count = counts.most_common(1)[0][1]
 
         # 홈페이지(depth=0)는 네비게이션 때문에 중복 path가 쉽게 생기므로
         # 더 엄격하게: 채용 관련 링크 path가 최소 5개 이상일 때만 listing 인정
         if depth == 0:
-            return max_count >= 5
+            return max_count >= threshold
 
         # 그 외(depth>=1)는 3개 이상이면 listing으로 인정
-        return max_count >= 3
+        return max_count >= threshold
 
 
     def looks_like_onepage(self, response, text, depth):
@@ -830,14 +854,20 @@ class DiscoverCareersSpider(Spider):
             )
 
     def _get_text(self, response):
-        return " ".join(response.css("body ::text").getall())
+        cache = self._get_response_cache(response)
+        if "body_text" not in cache:
+            cache["body_text"] = " ".join(response.css("body ::text").getall())
+        return cache["body_text"]
 
     def _get_visible_text(self, response) -> str:
         # Exclude script/style/noscript to avoid inflating text length.
-        parts = response.xpath(
-            "//body//text()[not(ancestor::script) and not(ancestor::style) and not(ancestor::noscript) and normalize-space()]"
-        ).getall()
-        return " ".join((p or "").strip() for p in parts if p and p.strip())
+        cache = self._get_response_cache(response)
+        if "visible_text" not in cache:
+            parts = response.xpath(
+                "//body//text()[not(ancestor::script) and not(ancestor::style) and not(ancestor::noscript) and normalize-space()]"
+            ).getall()
+            cache["visible_text"] = " ".join((p or "").strip() for p in parts if p and p.strip())
+        return cache["visible_text"]
 
     def has_job_intent(self, response) -> bool:
         text = (self._get_visible_text(response) or "").lower()
@@ -874,6 +904,9 @@ class DiscoverCareersSpider(Spider):
 
         visible_text = self._get_visible_text(response)
         text_len = len((visible_text or "").strip())
+
+        if text_len >= 500:
+            return "text"
 
         # 2) Poster-like images
         poster_images = 0
@@ -951,23 +984,18 @@ class DiscoverCareersSpider(Spider):
         같은 회사 도메인의 링크가 있으면 그 URL을 반환.
         (wanted/saramin/jobkorea 등 외부 플랫폼은 여기서 제외)
         """
-        for a in response.css("a"):
-            href = (a.attrib.get("href") or "").strip()
+        for anchor in self._get_anchor_data(response):
+            href = anchor["href"]
             if not href:
                 continue
 
-            text = " ".join(a.css("::text").getall()).strip().lower()
-            label = " ".join(filter(None, [
-                a.attrib.get("title"),
-                a.attrib.get("aria-label"),
-            ])).strip().lower()
-            combined = f"{text} {label}"
+            combined = anchor["combined_lower"]
 
             # 채용 관련 명시적 텍스트가 있을 때만
             if not any(kw.lower() in combined for kw in PRIORITY_KEYWORDS):
                 continue
 
-            full_url = response.urljoin(href)
+            full_url = anchor["full_url"]
             lower = full_url.lower()
 
             # 외부 채용 플랫폼(정책상 여기선 제외)
