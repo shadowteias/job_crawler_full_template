@@ -2,6 +2,7 @@ import hashlib
 import os
 import logging
 import re
+from datetime import date, datetime, timedelta
 from urllib.parse import urlparse
 
 import django
@@ -14,6 +15,7 @@ os.environ.setdefault("DJANGO_ALLOW_ASYNC_UNSAFE", "true")
 django.setup()
 
 from api.models import Company, JobPosting  # noqa: E402
+from django.utils import timezone  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -67,10 +69,11 @@ def _make_unique_post_url(base_url: str, title: str, index: int = 0) -> str:
 
 # ===== LLM/BERT 훅 (옵션) =====
 try:
-    from api.llm_parser import parse_job_details_with_llm, is_job_posting  # type: ignore
+    from api.llm_parser import parse_job_details_with_llm, is_job_posting, extract_posting_dates  # type: ignore
 except Exception:  # pragma: no cover
     parse_job_details_with_llm = None
     is_job_posting = None
+    extract_posting_dates = None
 
 
 class JobCollectorSpider(Spider):
@@ -121,6 +124,7 @@ class JobCollectorSpider(Spider):
 
         # 이미 처리한 상세 URL 중복 방지용
         self.seen_urls = set()
+        self.saved_post_urls = set()
 
     # ============== 시작 ==============
 
@@ -334,11 +338,15 @@ class JobCollectorSpider(Spider):
             self.parse_onepage(response)
             return
 
-        for url in links:
+        for link_data in links:
             yield Request(
-                url=url,
+                url=link_data["url"],
                 callback=self.parse_job_detail,
-                cb_kwargs={"from_listing": True},
+                cb_kwargs={
+                    "from_listing": True,
+                    "listing_deadline_at": link_data.get("deadline_at"),
+                    "listing_posted_at": link_data.get("posted_at"),
+                },
                 dont_filter=True,
             )
 
@@ -424,7 +432,14 @@ class JobCollectorSpider(Spider):
             if by_text or (url_positive and not url_negative and len(path) >= 5):
                 if full_clean not in seen:
                     seen.add(full_clean)
-                    candidates.append(full_clean)
+                    deadline_at, posted_at = self.extract_listing_dates_for_anchor(a)
+                    candidates.append(
+                        {
+                            "url": full_clean,
+                            "deadline_at": deadline_at,
+                            "posted_at": posted_at,
+                        }
+                    )
                     logger.info(
                         "job_collector: listing candidate by text company_id=%s url=%s text=%s",
                         self.company_id,
@@ -474,6 +489,7 @@ class JobCollectorSpider(Spider):
                 if len(desc) < 120 or not self._looks_like_job_body(desc):
                     return
                 title = self._pick_title(response)
+                deadline_at, posted_at = self.extract_posting_dates_for_text(desc, fallback_text=full_text_body)
                 jobs.append({
                     "post_url": _make_unique_post_url(url, title),
                     "title": title,
@@ -485,8 +501,8 @@ class JobCollectorSpider(Spider):
                     "benefits": parsed.get("benefits") or "",
                     "employment_type": parsed.get("employment_type") or "",
                     "salary": parsed.get("salary") or "",
-                    "deadline_at": parsed.get("deadline_at"),
-                    "posted_at": parsed.get("posted_at"),
+                    "deadline_at": deadline_at,
+                    "posted_at": posted_at,
                 })
         else:
             for i, h in enumerate(headings):
@@ -520,6 +536,14 @@ class JobCollectorSpider(Spider):
                     except Exception as e:
                         logger.warning("job_collector: parser failed for onepage block %s (%s)", url, e)
                         parsed = {}
+                deadline_at, posted_at = self.extract_posting_dates_for_text(desc, fallback_text=full_text_body)
+                else:
+                    parsed = {}
+
+                deadline_at = self.coerce_date(parsed.get("deadline_at"))
+                posted_at = self.coerce_date(parsed.get("posted_at"))
+                if not deadline_at and not posted_at:
+                    deadline_at, posted_at = self.extract_posting_dates_for_text(desc, fallback_text=full_text_body)
 
                 jobs.append({
                     "post_url": _make_unique_post_url(url, title, i),
@@ -532,8 +556,8 @@ class JobCollectorSpider(Spider):
                     "benefits": parsed.get("benefits") or "",
                     "employment_type": parsed.get("employment_type") or "",
                     "salary": parsed.get("salary") or "",
-                    "deadline_at": parsed.get("deadline_at"),
-                    "posted_at": parsed.get("posted_at"),
+                    "deadline_at": deadline_at,
+                    "posted_at": posted_at,
                 })
 
         logger.info(
@@ -542,11 +566,29 @@ class JobCollectorSpider(Spider):
         )
 
         for data in jobs:
+            post_url = data.get("post_url")
+            deadline_at = self.coerce_date(data.get("deadline_at"))
+            posted_at = self.coerce_date(data.get("posted_at"))
+            is_valid, invalid_reason = self.evaluate_posting_validity(deadline_at, posted_at)
+            if not is_valid:
+                self.deactivate_existing_posting(post_url, invalid_reason)
+                logger.info(
+                    "job_collector: skip invalid one_page/main posting company_id=%s url=%s reason=%s deadline_at=%s posted_at=%s",
+                    self.company_id,
+                    post_url,
+                    invalid_reason,
+                    deadline_at,
+                    posted_at,
+                )
+                continue
+
+            data["deadline_at"] = deadline_at
+            data["posted_at"] = posted_at
             self.upsert_jobposting(data)
 
     # ============== 상세 페이지 처리 ==============
 
-    def parse_job_detail(self, response, from_listing=False):
+    def parse_job_detail(self, response, from_listing=False, listing_deadline_at=None, listing_posted_at=None):
         self._check_external_platform(response)
 
         url = response.url.rstrip("/")
@@ -555,14 +597,19 @@ class JobCollectorSpider(Spider):
             return
         self.seen_urls.add(url)
 
-        data = self.extract_job_from_detail(response, from_listing=from_listing)
+        data = self.extract_job_from_detail(
+            response,
+            from_listing=from_listing,
+            listing_deadline_at=listing_deadline_at,
+            listing_posted_at=listing_posted_at,
+        )
         if not data:
             logger.info("job_collector: extract_job_from_detail returned None for url=%s", url)
             return
 
         self.upsert_jobposting(data)
 
-    def extract_job_from_detail(self, response, from_listing=False):
+    def extract_job_from_detail(self, response, from_listing=False, listing_deadline_at=None, listing_posted_at=None):
         url = response.url.rstrip("/")
 
         title = self._pick_title(response)
@@ -670,6 +717,49 @@ class JobCollectorSpider(Spider):
                 ["전형 절차", "채용 절차", "전형절차", "Process"],
             )[:2000]
 
+        if not benefits:
+            benefits = self.extract_benefits(full_text)
+
+        if not employment_type:
+            employment_type = self.extract_employment_type(full_text)
+
+        if not salary:
+            salary = self.extract_salary(full_text)
+
+        if not location:
+            location = self.extract_location(full_text)
+
+        deadline_at = self.coerce_date(deadline_at)
+        posted_at = self.coerce_date(posted_at)
+        if not deadline_at and not posted_at:
+            deadline_at, posted_at = self.extract_posting_dates_for_text(job_desc or full_text, fallback_text=full_text)
+        original_deadline_at = deadline_at
+        original_posted_at = posted_at
+        if not deadline_at and listing_deadline_at:
+            deadline_at = self.coerce_date(listing_deadline_at)
+        if not posted_at and listing_posted_at:
+            posted_at = self.coerce_date(listing_posted_at)
+        if (not original_deadline_at and deadline_at) or (not original_posted_at and posted_at):
+            logger.info(
+                "job_collector: applied listing-date fallback company_id=%s url=%s deadline_at=%s posted_at=%s",
+                self.company_id,
+                url,
+                deadline_at,
+                posted_at,
+            )
+
+        is_valid, invalid_reason = self.evaluate_posting_validity(deadline_at, posted_at)
+        if not is_valid:
+            self.deactivate_existing_posting(url, invalid_reason)
+            logger.info(
+                "job_collector: skip invalid/stale detail posting company_id=%s url=%s reason=%s deadline_at=%s posted_at=%s",
+                self.company_id,
+                url,
+                invalid_reason,
+                deadline_at,
+                posted_at,
+            )
+            return None
         return {
             "post_url": url,
             "title": title,
@@ -684,6 +774,107 @@ class JobCollectorSpider(Spider):
             "deadline_at": deadline_at,
             "posted_at": posted_at,
         }
+
+    def coerce_date(self, value):
+        if not value:
+            return None
+        if isinstance(value, date) and not isinstance(value, datetime):
+            return value
+        if isinstance(value, datetime):
+            return value.date()
+        if isinstance(value, str):
+            value = value.strip()
+            if not value:
+                return None
+            for fmt in ["%Y-%m-%d", "%Y.%m.%d", "%Y/%m/%d"]:
+                try:
+                    return datetime.strptime(value, fmt).date()
+                except ValueError:
+                    continue
+        return None
+
+    def extract_posting_dates_for_text(self, text: str, fallback_text: str = ""):
+        if extract_posting_dates:
+            try:
+                deadline_at, posted_at = extract_posting_dates(text or "")
+                deadline_at = self.coerce_date(deadline_at)
+                posted_at = self.coerce_date(posted_at)
+                if deadline_at or posted_at:
+                    return deadline_at, posted_at
+            except Exception as e:
+                logger.debug("job_collector: extract_posting_dates failed for primary text (%s)", e)
+
+            if fallback_text and fallback_text != text:
+                try:
+                    deadline_at, posted_at = extract_posting_dates(fallback_text)
+                    return self.coerce_date(deadline_at), self.coerce_date(posted_at)
+                except Exception as e:
+                    logger.debug("job_collector: extract_posting_dates failed for fallback text (%s)", e)
+
+        return None, None
+
+    def extract_listing_dates_for_anchor(self, anchor):
+        contexts = []
+
+        anchor_text = " ".join(anchor.css("::text").getall()).strip()
+        if anchor_text:
+            contexts.append(anchor_text)
+
+        parent_text = " ".join(anchor.xpath("parent::*//text()").getall()).strip()
+        if parent_text:
+            contexts.append(parent_text)
+
+        container_xpaths = [
+            "ancestor::*[self::li or self::tr or self::article][1]//text()",
+            "ancestor::*[self::div][1]//text()",
+        ]
+        for xpath_expr in container_xpaths:
+            text = " ".join(anchor.xpath(xpath_expr).getall()).strip()
+            if text:
+                contexts.append(text)
+
+        seen = set()
+        for text in contexts:
+            normalized = re.sub(r"\s+", " ", text).strip()
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            deadline_at, posted_at = self.extract_posting_dates_for_text(normalized)
+            if deadline_at or posted_at:
+                return deadline_at, posted_at
+
+        return None, None
+
+    def evaluate_posting_validity(self, deadline_at, posted_at):
+        today = timezone.now().date()
+        one_month_ago = today - timedelta(days=30)
+
+        if deadline_at:
+            if deadline_at >= today:
+                return True, "deadline_future"
+            return False, "deadline_expired"
+
+        if posted_at:
+            if posted_at >= one_month_ago:
+                return True, "posted_recent"
+            return False, "posted_too_old"
+
+        return False, "missing_dates"
+
+    def deactivate_existing_posting(self, post_url: str, reason: str):
+        if not post_url:
+            return
+        updated = JobPosting.objects.filter(post_url=post_url).exclude(status="expired", is_active=False).update(
+            status="expired",
+            is_active=False,
+        )
+        if updated:
+            logger.info(
+                "job_collector: marked existing posting expired company_id=%s url=%s reason=%s",
+                self.company_id,
+                post_url,
+                reason,
+            )
 
     # ============== classifier 래퍼 ==============
 
@@ -874,6 +1065,7 @@ class JobCollectorSpider(Spider):
             "company": self.company,
             "title": (data.get("title") or "")[:255],
             "status": "active",
+            "is_active": True,
         }
 
         field_limits = {
@@ -921,6 +1113,7 @@ class JobCollectorSpider(Spider):
         )
 
         if created:
+            self.saved_post_urls.add(post_url)
             logger.info(
                 "job_collector: created JobPosting company_id=%s id=%s url=%s",
                 self.company_id,
@@ -968,6 +1161,10 @@ class JobCollectorSpider(Spider):
             obj.status = "active"
             changed = True
 
+        if not obj.is_active:
+            obj.is_active = True
+            changed = True
+
         if changed:
             obj.save()
             logger.info(
@@ -976,9 +1173,26 @@ class JobCollectorSpider(Spider):
                 post_url,
             )
 
+        self.saved_post_urls.add(post_url)
+
     # ============== 종료 ==============
 
-    def close(self, reason):
+    def closed(self, reason):
+        if reason == "finished":
+            stale_qs = JobPosting.objects.filter(company=self.company)
+            if self.saved_post_urls:
+                stale_qs = stale_qs.exclude(post_url__in=self.saved_post_urls)
+            expired_count = stale_qs.exclude(status="expired", is_active=False).update(
+                status="expired",
+                is_active=False,
+            )
+            logger.info(
+                "job_collector: expired stale postings company_id=%s count=%s kept=%s",
+                self.company_id,
+                expired_count,
+                len(self.saved_post_urls),
+            )
+
         logger.info(
             "job_collector: finished company_id=%s reason=%s seen=%s",
             self.company_id,

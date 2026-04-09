@@ -161,13 +161,11 @@ def _extract_dates(text: str) -> tuple:
             deadline_at = dt
             break
 
-    if posted_at and not deadline_at:
-        deadline_at = posted_at + timedelta(days=30)
-
-    if not posted_at and deadline_at:
-        posted_at = deadline_at - timedelta(days=30)
-
     return deadline_at, posted_at
+
+
+def extract_posting_dates(text: str) -> tuple:
+    return _extract_dates(text)
 
 
 def _extract_salary(text: str) -> str:
@@ -339,7 +337,7 @@ def parse_job_details_with_llm(
 
     text_combined = ' '.join(text.split())
 
-    deadline_at, posted_at = _extract_dates(text)
+    deadline_at, posted_at = extract_posting_dates(text)
     if deadline_at:
         result["deadline_at"] = deadline_at.strftime("%Y-%m-%d")
     if posted_at:
