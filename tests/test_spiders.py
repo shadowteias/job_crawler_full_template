@@ -5,6 +5,7 @@ Discovered spider logic에 대한 단위 테스트
 """
 import unittest
 import re
+from datetime import date, timedelta
 
 
 # ============================================================================
@@ -401,6 +402,131 @@ class TestExtractAllSections(unittest.TestCase):
         result = self.extract_all_sections(text)
         self.assertIn('job_description', result)
         self.assertIn('qualifications', result)
+
+
+class TestJobValidityRule(unittest.TestCase):
+    def evaluate_posting_validity(self, deadline_at, posted_at, today=None):
+        today = today or date(2026, 4, 7)
+        one_month_ago = today - timedelta(days=30)
+
+        if deadline_at:
+            if deadline_at >= today:
+                return True, "deadline_future"
+            return False, "deadline_expired"
+
+        if posted_at:
+            if posted_at >= one_month_ago:
+                return True, "posted_recent"
+            return False, "posted_too_old"
+
+        return False, "missing_dates"
+
+    def test_future_deadline_is_valid(self):
+        ok, reason = self.evaluate_posting_validity(date(2026, 4, 30), None)
+        self.assertTrue(ok)
+        self.assertEqual(reason, "deadline_future")
+
+    def test_past_deadline_is_invalid_even_if_posted_recent(self):
+        ok, reason = self.evaluate_posting_validity(date(2026, 4, 1), date(2026, 4, 5))
+        self.assertFalse(ok)
+        self.assertEqual(reason, "deadline_expired")
+
+    def test_recent_posted_without_deadline_is_valid(self):
+        ok, reason = self.evaluate_posting_validity(None, date(2026, 3, 20))
+        self.assertTrue(ok)
+        self.assertEqual(reason, "posted_recent")
+
+    def test_old_posted_without_deadline_is_invalid(self):
+        ok, reason = self.evaluate_posting_validity(None, date(2026, 2, 20))
+        self.assertFalse(ok)
+        self.assertEqual(reason, "posted_too_old")
+
+    def test_missing_dates_is_invalid(self):
+        ok, reason = self.evaluate_posting_validity(None, None)
+        self.assertFalse(ok)
+        self.assertEqual(reason, "missing_dates")
+
+
+class TestDateExtractionSemantics(unittest.TestCase):
+    def extract_dates(self, text: str):
+        deadline_at = None
+        posted_at = None
+        text_combined = ' '.join(text.split())
+        deadline_keywords = ["마감", "지원", "截止", "기한", "까지"]
+        posted_keywords = ["게시", "등록", "작성", "시작", "작성일"]
+        date_patterns = [
+            r"(\d{4})\.(\d{1,2})\.(\d{1,2})",
+            r"(\d{4})-(\d{1,2})-(\d{1,2})",
+        ]
+
+        candidates = []
+        for pattern in date_patterns:
+            for match in re.finditer(pattern, text_combined):
+                y, m, d = match.groups()
+                dt = date(int(y), int(m), int(d))
+                pos = match.start()
+                context = text_combined[max(0, pos-10):pos+10].lower()
+                is_deadline = any(kw in context for kw in deadline_keywords)
+                is_posted = any(kw in context for kw in posted_keywords)
+                candidates.append((dt, pos, is_deadline, is_posted))
+
+        candidates.sort(key=lambda x: x[1])
+        for dt, pos, is_deadline, is_posted in candidates:
+            if is_deadline and deadline_at is None:
+                deadline_at = dt
+            elif is_posted and posted_at is None:
+                posted_at = dt
+            elif deadline_at is None and posted_at is None:
+                deadline_at = dt
+                break
+        return deadline_at, posted_at
+
+    def test_only_posted_date_does_not_fabricate_deadline(self):
+        deadline_at, posted_at = self.extract_dates("게시일 2026-04-01")
+        self.assertIsNone(deadline_at)
+        self.assertEqual(posted_at, date(2026, 4, 1))
+
+    def test_only_deadline_does_not_fabricate_posted(self):
+        deadline_at, posted_at = self.extract_dates("마감 2026-04-30")
+        self.assertEqual(deadline_at, date(2026, 4, 30))
+        self.assertIsNone(posted_at)
+
+
+class TestListingDateFallback(unittest.TestCase):
+    def choose_dates(self, detail_deadline_at, detail_posted_at, listing_deadline_at, listing_posted_at):
+        deadline_at = detail_deadline_at or listing_deadline_at
+        posted_at = detail_posted_at or listing_posted_at
+        return deadline_at, posted_at
+
+    def test_detail_dates_win_over_listing_dates(self):
+        deadline_at, posted_at = self.choose_dates(
+            date(2026, 4, 30),
+            date(2026, 4, 1),
+            date(2026, 5, 1),
+            date(2026, 4, 2),
+        )
+        self.assertEqual(deadline_at, date(2026, 4, 30))
+        self.assertEqual(posted_at, date(2026, 4, 1))
+
+    def test_listing_dates_fill_missing_detail_dates(self):
+        deadline_at, posted_at = self.choose_dates(
+            None,
+            None,
+            date(2026, 4, 30),
+            date(2026, 4, 1),
+        )
+        self.assertEqual(deadline_at, date(2026, 4, 30))
+        self.assertEqual(posted_at, date(2026, 4, 1))
+
+    def test_partial_detail_dates_keep_listing_only_for_missing_side(self):
+        deadline_at, posted_at = self.choose_dates(
+            None,
+            date(2026, 4, 1),
+            date(2026, 4, 30),
+            date(2026, 4, 2),
+        )
+        self.assertEqual(deadline_at, date(2026, 4, 30))
+        self.assertEqual(posted_at, date(2026, 4, 1))
 
 
 # ============================================================================
