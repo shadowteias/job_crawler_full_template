@@ -520,6 +520,7 @@ class DiscoverCareersSpider(Spider):
         self.max_depth = 4
         self.visited = set()
         self._response_cache = {}
+        self.found = False
 
     # Scrapy 2.13 경고 회피 위해 start_requests 유지 (하위호환),
     # 필요시 start() 도입 가능.
@@ -534,6 +535,9 @@ class DiscoverCareersSpider(Spider):
     # ===== 핵심 로직 =====
 
     def parse_page(self, response):
+        if self.found:
+            return
+
         depth = response.meta.get("depth", 0)
         url = response.url
         self.visited.add(url)
@@ -820,6 +824,16 @@ class DiscoverCareersSpider(Spider):
         DJANGO_ALLOW_ASYNC_UNSAFE=true 전제 하에 동작.
         """
         try:
+            if self.found:
+                logger.info(
+                    "[discover] SKIP SAVE after found company_id=%s candidate=%s page_type=%s post_type=%s",
+                    self.company_id,
+                    page_url,
+                    page_type,
+                    post_type,
+                )
+                return
+
             # DB 연결 확인 (유실된 커넥션 대비)
             for conn in connections.all():
                 try:
@@ -833,6 +847,7 @@ class DiscoverCareersSpider(Spider):
                 post_type=post_type,
             )
             if updated:
+                self.found = True
                 logger.info(
                     "[discover] SAVED company_id=%s url=%s page_type=%s post_type=%s",
                     self.company_id,
@@ -984,6 +999,16 @@ class DiscoverCareersSpider(Spider):
         같은 회사 도메인의 링크가 있으면 그 URL을 반환.
         (wanted/saramin/jobkorea 등 외부 플랫폼은 여기서 제외)
         """
+        candidates = []
+        strong_path_tokens = [
+            "recruit", "career", "careers", "jobs", "job", "hiring",
+            "job_notice", "notice", "employment", "apply",
+        ]
+        weak_path_tokens = [
+            "culture", "story", "people", "talent", "welfare", "benefit",
+            "vision", "about", "company", "intro",
+        ]
+
         for anchor in self._get_anchor_data(response):
             href = anchor["href"]
             if not href:
@@ -1004,6 +1029,18 @@ class DiscoverCareersSpider(Spider):
 
             # 같은 회사 도메인(서브도메인 포함)만 허용
             if self.is_same_domain(full_url):
-                return full_url
+                score = self.score_link_text(anchor["text"], anchor["label"])
+                lower = full_url.lower()
+                for token in strong_path_tokens:
+                    if token in lower:
+                        score += 3
+                for token in weak_path_tokens:
+                    if token in lower:
+                        score -= 2
+                candidates.append((score, full_url))
 
-        return None
+        if not candidates:
+            return None
+
+        candidates.sort(key=lambda x: x[0], reverse=True)
+        return candidates[0][1]
