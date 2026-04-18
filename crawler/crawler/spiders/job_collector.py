@@ -293,6 +293,68 @@ class JobCollectorSpider(Spider):
                 return c[:255]
         return "채용 공고"
 
+    def has_specific_job_title(self, title: str) -> bool:
+        if not title:
+            return False
+        lowered = title.lower()
+        role_keywords = [
+            "개발", "엔지니어", "연구", "영업", "마케팅", "디자이너", "컨설턴트",
+            "데이터", "ai", "software", "frontend", "backend", "developer",
+            "engineer", "research", "sales", "manager", "pm", "인턴",
+            "전문연구요원", "시설관리", "경비", "매니저", "사원",
+        ]
+        return any(keyword in lowered for keyword in role_keywords)
+
+    def is_generic_job_title(self, title: str) -> bool:
+        if not title:
+            return True
+        lowered = title.lower().strip()
+        generic_markers = [
+            "채용안내", "채용정보", "인재채용", "채용공고", "채용 공고",
+            "채용", "인재 채용", "career", "careers", "recruit",
+            "recruitment", "join us", "채용정보 상세보기", "공지사항",
+            "기업정보", "회사소개", "주메뉴", "메뉴",
+        ]
+        return any(marker in lowered for marker in generic_markers) and not self.has_specific_job_title(title)
+
+    def passes_high_confidence_gate(
+        self,
+        *,
+        title: str,
+        job_desc: str,
+        qualifications: str,
+        preferred: str,
+        process: str,
+        benefits: str,
+        employment_type: str,
+        salary: str,
+        location: str,
+    ):
+        desc = re.sub(r"\s+", " ", job_desc or "").strip()
+        generic_title = self.is_generic_job_title(title)
+        specific_title = self.has_specific_job_title(title)
+        strong_fields = sum(
+            1 for value in [qualifications, preferred, process, salary, employment_type] if (value or "").strip()
+        )
+        support_fields = sum(
+            1 for value in [benefits, location] if (value or "").strip()
+        )
+        desc_strong = self._looks_like_job_body(desc)
+
+        if generic_title and strong_fields < 2:
+            return False, "generic_title_without_structure"
+
+        if strong_fields >= 1 and desc_strong:
+            return True, "structured_fields_present"
+
+        if specific_title and desc_strong and len(desc) >= 250:
+            return True, "specific_title_and_strong_body"
+
+        if specific_title and support_fields >= 1 and len(desc) >= 300:
+            return True, "specific_title_with_support"
+
+        return False, "low_confidence_content"
+
     # ============== 공통: 외부 플랫폼 감지 ==============
 
     def _check_external_platform(self, response):
