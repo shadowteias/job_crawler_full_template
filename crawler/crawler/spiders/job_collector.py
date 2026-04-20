@@ -451,9 +451,21 @@ class JobCollectorSpider(Spider):
 
         if not headings:
             if len(full_text_body) >= 80 and self._accept_as_job(full_text_body):
+                parsed = {}
+                if parse_job_details_with_llm:
+                    try:
+                        parsed = parse_job_details_with_llm(
+                            full_text_body,
+                            url=url,
+                            company_name=self.company.name,
+                        ) or {}
+                    except Exception as e:
+                        logger.warning("job_collector: parser failed for onepage %s (%s)", url, e)
+                        parsed = {}
                 sections = self.extract_all_sections(full_text_body)
                 desc = (
-                    sections.get("job_description")
+                    parsed.get("job_description")
+                    or sections.get("job_description")
                     or sections.get("qualifications")
                     or ""
                 ).strip()
@@ -466,8 +478,15 @@ class JobCollectorSpider(Spider):
                     "post_url": _make_unique_post_url(url, title),
                     "title": title,
                     "job_description": desc[:20000],
-                    "location": self.extract_location(desc),
-                    "benefits": self.extract_benefits(desc),
+                    "qualifications": (parsed.get("qualifications") or sections.get("qualifications") or "")[:2000],
+                    "preferred_qualifications": (parsed.get("preferred_qualifications") or sections.get("preferred_qualifications") or "")[:2000],
+                    "hiring_process": (parsed.get("hiring_process") or "")[:2000],
+                    "location": parsed.get("location") or "",
+                    "benefits": parsed.get("benefits") or "",
+                    "employment_type": parsed.get("employment_type") or "",
+                    "salary": parsed.get("salary") or "",
+                    "deadline_at": parsed.get("deadline_at"),
+                    "posted_at": parsed.get("posted_at"),
                 })
         else:
             for i, h in enumerate(headings):
@@ -490,12 +509,31 @@ class JobCollectorSpider(Spider):
                 if not self._accept_as_job(desc):
                     continue
 
+                parsed = {}
+                if parse_job_details_with_llm:
+                    try:
+                        parsed = parse_job_details_with_llm(
+                            desc,
+                            url=_make_unique_post_url(url, title, i),
+                            company_name=self.company.name,
+                        ) or {}
+                    except Exception as e:
+                        logger.warning("job_collector: parser failed for onepage block %s (%s)", url, e)
+                        parsed = {}
+
                 jobs.append({
                     "post_url": _make_unique_post_url(url, title, i),
                     "title": title,
-                    "job_description": self._trim_boilerplate(desc)[:20000],
-                    "location": self.extract_location(desc),
-                    "benefits": self.extract_benefits(desc),
+                    "job_description": (parsed.get("job_description") or self._trim_boilerplate(desc))[:20000],
+                    "qualifications": (parsed.get("qualifications") or "")[:2000],
+                    "preferred_qualifications": (parsed.get("preferred_qualifications") or "")[:2000],
+                    "hiring_process": (parsed.get("hiring_process") or "")[:2000],
+                    "location": parsed.get("location") or "",
+                    "benefits": parsed.get("benefits") or "",
+                    "employment_type": parsed.get("employment_type") or "",
+                    "salary": parsed.get("salary") or "",
+                    "deadline_at": parsed.get("deadline_at"),
+                    "posted_at": parsed.get("posted_at"),
                 })
 
         logger.info(
@@ -632,18 +670,6 @@ class JobCollectorSpider(Spider):
                 ["전형 절차", "채용 절차", "전형절차", "Process"],
             )[:2000]
 
-        if not benefits:
-            benefits = self.extract_benefits(full_text)
-
-        if not employment_type:
-            employment_type = self.extract_employment_type(full_text)
-
-        if not salary:
-            salary = self.extract_salary(full_text)
-
-        if not location:
-            location = self.extract_location(full_text)
-
         return {
             "post_url": url,
             "title": title,
@@ -703,9 +729,6 @@ class JobCollectorSpider(Spider):
         
         return hits >= 3 or (hits >= 2 and section_count >= 1)
 
-    498#JH|    # ============== 텍스트 파싱 헬퍼 ==============
-
-    # ===== Improved Section Extractor =====
     def extract_section_improved(self, text: str, section_name: str) -> str:
         """
         Improved section extraction with better boundary detection.

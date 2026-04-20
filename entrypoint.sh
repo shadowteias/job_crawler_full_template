@@ -20,7 +20,7 @@ else:
 PY
 fi
 
-if [ -f manage.py ]; then
+if [ -f manage.py ] && [ "$#" -gt 0 ] && [ "$1" = "gunicorn" ]; then
   echo "Applying database migrations..."
   python manage.py migrate --noinput || true
   echo "Collecting static files..."

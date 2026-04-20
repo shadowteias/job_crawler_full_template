@@ -1,0 +1,16 @@
+{
+  "started_at": "2026-04-20 06:11:08",
+  "finished_at": "2026-04-20 06:36:49",
+  "seed": 20260420,
+  "pool_size": 20394,
+  "used_company_count": 250,
+  "batch_size": 50,
+  "target_recruits_gt": 20,
+  "target_jobs_gt": 30,
+  "max_iterations": 5,
+  "max_hours": 8.0,
+  "iterations_run": 5,
+  "success_iteration": null,
+  "threshold_met": false,
+  "evidence_dir": ".sisyphus/evidence/validation-rerun"
+}

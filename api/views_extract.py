@@ -6,20 +6,14 @@ from .counseling_field_extractor import extract_from_text  # ← 여기만 변�
 
 def _check_api_key(request):
     want = getattr(settings, "API_INTERNAL_TOKEN", None)
-    got = request.headers.get("X-API-KEY") or request.headers.get("Authorization", "").replace("Bearer ", "")
+    got = request.headers.get("X-Internal-Token")
+    if not got:
+        got = request.headers.get("X-API-KEY")
+    if not got:
+        got = request.headers.get("Authorization", "").replace("Bearer ", "")
     return bool(want) and want == got
 
 class CounselingNormalizeView(APIView):
-    """
-    POST /api/normalize/counseling
-    헤더: X-API-KEY: <API_INTERNAL_TOKEN>
-    바디:
-      {
-        "text": "...긴 상담 텍스트...",
-        "only_fields": ["급여","근무지", ...]   // 선택
-      }
-    응답: 추출/정규화된 표준 필드 dict
-    """
     def post(self, request, *args, **kwargs):
         if not _check_api_key(request):
             return Response({"detail": "Unauthorized"}, status=status.HTTP_401_UNAUTHORIZED)
