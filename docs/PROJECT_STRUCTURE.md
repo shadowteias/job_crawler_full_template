@@ -68,6 +68,10 @@ lms_tp/
 │   ├── TECHNICAL.md           # 기술 문서
 │   └── DATA_SOURCES.md        # 데이터 소스 설명
 │
+├── models/                    # 로컬 모델 다운로드 경로 (git 미추적)
+├── scripts/                   # 보조 스크립트 (예: 모델 다운로드)
+│   └── download_models.py     # Hugging Face에서 모델 파일 bootstrap
+│
 ├── manage.py                  # Django management CLI
 ├── docker-compose.yml         # 컨테이너 정의
 ├── requirements.txt           # Python 의존성

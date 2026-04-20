@@ -38,3 +38,9 @@ db_data/
 # 예시 파일만 허용하려면 (있다면) .env.example 는 트래킹
 !.env.example
 !.env.template
+
+# Local model caches / downloaded weights
+models/*.gguf
+models/**/*.gguf
+models/.cache/
+models/qwen2.5-0.5b/

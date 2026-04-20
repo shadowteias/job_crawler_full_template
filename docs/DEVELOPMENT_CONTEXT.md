@@ -16,7 +16,7 @@
 - **Crawler**: Scrapy
 - **Background Jobs**: Celery + Redis
 - **Database**: MariaDB (Docker)
-- **LLM**: 로컬 (llama-cpp-python + Qwen2.5-0.5B)
+- **LLM**: 로컬 (llama-cpp-python + Qwen2.5-0.5B, 모델 파일은 clone 후 별도 다운로드)
 
 ---
 
@@ -187,6 +187,9 @@ b6465e8 Export latest companies and job postings CSV snapshots
 # 레포지토리 클론
 git clone https://github.com/shadowteias/job_crawler_full_template.git
 cd job_crawler_full_template
+
+# 모델 다운로드 (git 미포함)
+python scripts/download_models.py
 
 # Docker 실행
 docker network create backend_net
