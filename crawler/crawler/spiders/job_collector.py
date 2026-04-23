@@ -598,7 +598,6 @@ class JobCollectorSpider(Spider):
                     except Exception as e:
                         logger.warning("job_collector: parser failed for onepage block %s (%s)", url, e)
                         parsed = {}
-                deadline_at, posted_at = self.extract_posting_dates_for_text(desc, fallback_text=full_text_body)
                 else:
                     parsed = {}
 
