@@ -1,6 +1,6 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
-from .views import JobPostingViewSet, CrawlTriggerView, CrawlStatusView
+from .views import JobPostingViewSet, CrawlTriggerView, CrawlStatusView, ManualCrawlRunView
 from .views_jobs import JobPostingListView
 from .views_match import student_top_view, company_top_view, batch_match_view
 
@@ -12,6 +12,7 @@ urlpatterns = [
     path('', include(router.urls)),
     path('crawl/trigger/', CrawlTriggerView.as_view(), name='crawl-trigger'),
     path('crawl/status/',  CrawlStatusView.as_view(),  name='crawl-status'),
+    path('crawl/run/', ManualCrawlRunView.as_view(), name='crawl-run-manual'),
 
     path("normalize/", include("api.urls_normalize")),
     path("jobs", JobPostingListView.as_view(), name="api-jobs-list"),

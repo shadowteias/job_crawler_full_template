@@ -5,6 +5,7 @@ import re
 import time
 import subprocess
 import logging
+import json
 from urllib.parse import urlparse, urlunparse
 
 from celery import shared_task, chain
@@ -364,6 +365,36 @@ import fcntl
 import time
 from celery import shared_task
 from django.db import close_old_connections
+import redis
+
+LOCK_KEY = "crawler:lock"
+STATUS_KEY = "crawler:status"
+r = redis.from_url(getattr(settings, "REDIS_URL", "redis://redis:6379/0"))
+
+
+def _set_crawl_status(payload: dict):
+    try:
+        r.set(STATUS_KEY, json.dumps(payload, ensure_ascii=False))
+    except Exception:
+        logger.exception("failed to set crawl status")
+
+
+def _clear_crawl_lock():
+    try:
+        r.delete(LOCK_KEY)
+    except Exception:
+        logger.exception("failed to clear crawl lock")
+
+
+def _acquire_crawl_lock(payload: dict) -> bool:
+    try:
+        acquired = bool(r.set(LOCK_KEY, "1", nx=True, ex=60 * 60 * 6))
+        if acquired:
+            _set_crawl_status(payload)
+        return acquired
+    except Exception:
+        logger.exception("failed to acquire crawl lock")
+        return False
 
 @shared_task
 def collect_osm_companies(
@@ -958,6 +989,79 @@ def run_full_crawling_cycle():
     workflow.apply_async()
 
     logger.info("full_cycle: chain dispatched")
+
+
+@shared_task(name="api.tasks.run_manual_crawl")
+def run_manual_crawl(
+    *,
+    company_id_start=None,
+    company_id_end=None,
+    homepage_limit=500,
+    discover_limit=None,
+    collect_limit=None,
+    workers=2,
+    run_homepage_check=True,
+    run_discover=True,
+    run_collect=True,
+    force_homepage_recheck=False,
+):
+    status_payload = {
+        "state": "STARTING",
+        "mode": "manual",
+        "company_id_start": company_id_start,
+        "company_id_end": company_id_end,
+        "workers": workers,
+        "run_homepage_check": run_homepage_check,
+        "run_discover": run_discover,
+        "run_collect": run_collect,
+        "force_homepage_recheck": force_homepage_recheck,
+    }
+
+    if not _acquire_crawl_lock(status_payload):
+        logger.warning("run_manual_crawl: already running")
+        return {"detail": "already running"}
+
+    try:
+        results = {}
+
+        if run_homepage_check:
+            _set_crawl_status({**status_payload, "state": "RUNNING", "stage": "homepage_check"})
+            results["homepage_check"] = check_company_homepages(
+                limit=homepage_limit,
+                skip_dead=not force_homepage_recheck,
+                skip_recent_days=0 if force_homepage_recheck else 365,
+                request_timeout=10.0,
+                max_fail_before_dead=2,
+                company_id_start=company_id_start,
+                company_id_end=company_id_end,
+            )
+
+        if run_discover:
+            _set_crawl_status({**status_payload, "state": "RUNNING", "stage": "discover"})
+            results["discover"] = run_discover_careers_spiders_concurrent(
+                limit=discover_limit,
+                workers=workers,
+                company_id_start=company_id_start,
+                company_id_end=company_id_end,
+            )
+
+        if run_collect:
+            _set_crawl_status({**status_payload, "state": "RUNNING", "stage": "collect"})
+            results["collect"] = run_job_collector_spiders_concurrent(
+                limit=collect_limit,
+                workers=workers,
+                company_id_start=company_id_start,
+                company_id_end=company_id_end,
+            )
+
+        _set_crawl_status({**status_payload, "state": "DONE", "results": results})
+        return results
+    except Exception as e:
+        logger.exception("run_manual_crawl failed")
+        _set_crawl_status({**status_payload, "state": "FAILED", "error": str(e)})
+        raise
+    finally:
+        _clear_crawl_lock()
 
 
 @shared_task

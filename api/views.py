@@ -82,3 +82,71 @@ class CrawlTriggerView(APIView):
         except Exception as e:
             logger.exception("Manual trigger failed")
             return Response({"detail": "failed", "error": str(e)}, status=500)
+
+
+class ManualCrawlRunView(APIView):
+    permission_classes = [HasInternalAPIToken]
+
+    def post(self, request):
+        if r.get(LOCK_KEY):
+            detail = _safe_json_loads(r.get(STATUS_KEY)) or {"state": "BUSY"}
+            return Response({"detail": "already running", "status": detail}, status=409)
+
+        payload = request.data if isinstance(request.data, dict) else {}
+
+        company_id_start = payload.get("company_id_start")
+        company_id_end = payload.get("company_id_end")
+        homepage_limit = int(payload.get("homepage_limit", 500))
+        discover_limit = payload.get("discover_limit")
+        collect_limit = payload.get("collect_limit")
+        workers = int(payload.get("workers", 2))
+        run_homepage_check = bool(payload.get("run_homepage_check", True))
+        run_discover = bool(payload.get("run_discover", True))
+        run_collect = bool(payload.get("run_collect", True))
+        force_homepage_recheck = bool(payload.get("force_homepage_recheck", False))
+
+        if company_id_start is not None:
+            company_id_start = int(company_id_start)
+        if company_id_end is not None:
+            company_id_end = int(company_id_end)
+        if discover_limit is not None:
+            discover_limit = int(discover_limit)
+        if collect_limit is not None:
+            collect_limit = int(collect_limit)
+
+        if workers < 1 or workers > 20:
+            return Response({"detail": "workers must be between 1 and 20"}, status=400)
+
+        if company_id_start is not None and company_id_end is not None and company_id_start > company_id_end:
+            return Response({"detail": "company_id_start must be <= company_id_end"}, status=400)
+
+        if not any([run_homepage_check, run_discover, run_collect]):
+            return Response({"detail": "at least one stage must be enabled"}, status=400)
+
+        try:
+            celery_app.send_task(
+                "api.tasks.run_manual_crawl",
+                kwargs={
+                    "company_id_start": company_id_start,
+                    "company_id_end": company_id_end,
+                    "homepage_limit": homepage_limit,
+                    "discover_limit": discover_limit,
+                    "collect_limit": collect_limit,
+                    "workers": workers,
+                    "run_homepage_check": run_homepage_check,
+                    "run_discover": run_discover,
+                    "run_collect": run_collect,
+                    "force_homepage_recheck": force_homepage_recheck,
+                },
+                queue="celery",
+            )
+            return Response({
+                "detail": "started",
+                "mode": "manual",
+                "company_id_start": company_id_start,
+                "company_id_end": company_id_end,
+                "workers": workers,
+            }, status=202)
+        except Exception as e:
+            logger.exception("Manual crawl API failed")
+            return Response({"detail": "failed", "error": str(e)}, status=500)
