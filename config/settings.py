@@ -24,7 +24,6 @@ INSTALLED_APPS = [
 
     'rest_framework',
     'corsheaders',
-    'django_celery_beat',
 
     'api',
 ]
@@ -100,7 +99,6 @@ REST_FRAMEWORK = {
 CORS_ALLOW_ALL_ORIGINS = True
 
 API_INTERNAL_TOKEN = os.getenv("API_INTERNAL_TOKEN", "internal_token_8h_7Kifc0r")
-CRAWL_INTERVAL_HOURS = int(os.getenv("CRAWL_INTERVAL_HOURS", "8"))
 
 # === Celery / Redis (추가) ===
 REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
@@ -111,6 +109,18 @@ CELERY_ACCEPT_CONTENT = ["json"]
 CELERY_TASK_SERIALIZER = "json"
 CELERY_RESULT_SERIALIZER = "json"
 CELERY_TIMEZONE = "Asia/Seoul"
+
+# Optional OpenAI/GPT parser. Keep disabled unless an environment-specific key
+# is injected into the app/worker process.
+OPENAI_PARSER_ENABLED = os.getenv("OPENAI_PARSER_ENABLED", "0") == "1"
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+OPENAI_PROJECT_ID = os.getenv("OPENAI_PROJECT_ID", os.getenv("OPENAI_PROJECT", ""))
+OPENAI_PROJECT = OPENAI_PROJECT_ID  # backward-compatible alias for older docs/env files
+OPENAI_ORGANIZATION = os.getenv("OPENAI_ORGANIZATION", "")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+OPENAI_TIMEOUT_SECONDS = float(os.getenv("OPENAI_TIMEOUT_SECONDS", "30"))
+OPENAI_MAX_RETRIES = int(os.getenv("OPENAI_MAX_RETRIES", "2"))
+OPENAI_ALLOW_REQUEST_API_KEY = os.getenv("OPENAI_ALLOW_REQUEST_API_KEY", "1" if DEBUG else "0") == "1"
 
 
 LOG_DIR = BASE_DIR / 'logs'

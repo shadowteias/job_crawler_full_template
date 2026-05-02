@@ -15,7 +15,7 @@ services:
     ports:
       - "${DB_PUBLISHED_PORT:-3308}:3306"   # 호스트 3308 -> 컨테이너 3306
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -uroot -p$$MYSQL_ROOT_PASSWORD"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -46,6 +46,8 @@ services:
         PYTHON_BASE_IMAGE: ${PYTHON_BASE_IMAGE}
         PYTHON_BASE_DIGEST: ${PYTHON_BASE_DIGEST}
     container_name: job_crawler_app
+    restart: unless-stopped
+    entrypoint: ["/app/entrypoint.sh"]
     command: gunicorn config.wsgi:application --bind 0.0.0.0:8000
     volumes:
       - .:/app
@@ -72,29 +74,9 @@ services:
         PYTHON_BASE_IMAGE: ${PYTHON_BASE_IMAGE}
         PYTHON_BASE_DIGEST: ${PYTHON_BASE_DIGEST}
     container_name: job_crawler_worker
+    restart: unless-stopped
+    entrypoint: ["/app/entrypoint.sh"]
     command: celery -A config worker -l info
-    volumes:
-      - .:/app
-    env_file:
-      - .env
-    depends_on:
-      app:
-        condition: service_started
-      redis:
-        condition: service_healthy
-    networks:
-      internal_net: {}
-
-  # 5) Celery 비트
-  beat:
-    build:
-      context: .
-      dockerfile: Dockerfile
-      args:
-        PYTHON_BASE_IMAGE: ${PYTHON_BASE_IMAGE}
-        PYTHON_BASE_DIGEST: ${PYTHON_BASE_DIGEST}
-    container_name: job_crawler_beat
-    command: celery -A config beat -l info --scheduler django_celery_beat.schedulers:DatabaseScheduler
     volumes:
       - .:/app
     env_file:

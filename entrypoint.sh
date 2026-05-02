@@ -25,8 +25,6 @@ if [ -f manage.py ] && [ "$#" -gt 0 ] && [ "$1" = "gunicorn" ]; then
   python manage.py migrate --noinput || true
   echo "Collecting static files..."
   python manage.py collectstatic --noinput || true
-  echo "Initializing schedule..."
-  python manage.py init_schedule || true
 fi
 
 if [ "$#" -gt 0 ]; then

@@ -15,7 +15,6 @@ import requests
 from celery import shared_task
 from django.db import transaction
 from django.utils import timezone
-from django_celery_beat.models import CrontabSchedule, PeriodicTask
 
 from api.models import Company
 
@@ -801,97 +800,3 @@ def check_company_homepages(
         "company_id_start": company_id_start,
         "company_id_end": company_id_end,
     }
-
-
-# =========================
-# Periodic schedules
-# =========================
-
-@shared_task(name="api.tasks.setup_company_seed_schedules")
-def setup_company_seed_schedules() -> Dict[str, Any]:
-    """
-    - OSM: 주 1회 (기존 tasks.py에서 수행)
-    - SWDB: 연 1회 (CSV 파일 기반. 파일은 사용자가 최신 파일로 교체)
-    - DART: 주 1회 (상장사, 최근 변경분 위주)
-    - Homepage check: 연 1회 (SWDB 이후) + 필요시 수동
-    """
-    # KST 기준 (django-celery-beat은 settings TIME_ZONE 반영)
-    # 화요일 새벽: 월요일 트래픽/점검 변동을 피하고, 주중 초반에 최신화
-    weekly, _ = CrontabSchedule.objects.get_or_create(
-        minute="20",
-        hour="3",
-        day_of_week="2",   # Tue
-        day_of_month="*",
-        month_of_year="*",
-    )
-
-    yearly, _ = CrontabSchedule.objects.get_or_create(
-        minute="0",
-        hour="4",
-        day_of_month="1",
-        month_of_year="2",  # Feb 1
-        day_of_week="*",
-    )
-
-    yearly_check, _ = CrontabSchedule.objects.get_or_create(
-        minute="10",
-        hour="5",
-        day_of_month="1",
-        month_of_year="2",  # Feb 1 05:10
-        day_of_week="*",
-    )
-
-    # 기존 동일 이름 태스크는 갱신(중복 방지)
-    def upsert_periodic(name: str, task: str, schedule: CrontabSchedule, kwargs: Dict[str, Any]):
-        PeriodicTask.objects.update_or_create(
-            name=name,
-            defaults={
-                "task": task,
-                "crontab": schedule,
-                "enabled": True,
-                "kwargs": json.dumps(kwargs, ensure_ascii=False),
-            },
-        )
-
-    # SWDB (CSV)
-    upsert_periodic(
-        name="seed-swdb-yearly",
-        task="api.tasks.collect_swdb_companies",
-        schedule=yearly,
-        kwargs={
-            "csv_path": os.getenv("SWDB_CSV_PATH", DEFAULT_SWDB_CSV_PATH),
-            "regions": [],  # no region filter by default
-            "limit": None,
-            "only_with_homepage": True,
-        },
-    )
-
-    # DART (listed-only delta)
-    upsert_periodic(
-        name="seed-dart-listed-weekly",
-        task="api.tasks.collect_dart_companies",
-        schedule=weekly,
-        kwargs={
-            "mode": "discover_listed",
-            "since_days": 14,
-            "limit": None,
-            "only_with_homepage": False,
-            "regions": [],  # no region filter
-        },
-    )
-
-    # Homepage liveness check (연 1회)
-    upsert_periodic(
-        name="check-homepages-yearly",
-        task="api.tasks.check_company_homepages",
-        schedule=yearly_check,
-        kwargs={
-            "limit": 2000,            # 너무 무겁게 가지 말고 배치로
-            "skip_dead": True,
-            "skip_recent_days": 365,
-            "request_timeout": 10.0,
-            "max_fail_before_dead": 2,
-        },
-    )
-
-    return {"ok": True}

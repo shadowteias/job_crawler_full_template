@@ -8,7 +8,7 @@ import logging
 import json
 from urllib.parse import urlparse, urlunparse
 
-from celery import shared_task, chain
+from celery import shared_task
 from django.db import close_old_connections, IntegrityError, transaction
 from django.conf import settings
 
@@ -19,7 +19,6 @@ from .company_sources import (
     collect_swdb_companies,
     collect_dart_companies,
     check_company_homepages,
-    setup_company_seed_schedules,
 )
 
 
@@ -947,48 +946,6 @@ def run_job_collector_spiders_concurrent(limit=None, workers=10, company_id_star
         total, completed, failed, elapsed,
     )
     return {"total": total, "completed": completed, "failed": failed, "elapsed": elapsed}
-
-
-@shared_task(name="api.tasks.run_full_crawling_cycle")
-def run_full_crawling_cycle():
-    """
-    전체 파이프라인 (권장 순서):
-      0) collect_osm_companies           - 회사 seed 자동 추가 (홈페이지 있는 것 위주)
-      1) find_missing_homepages (옵션)  - homepage_url 비어있는 회사 채우기
-      2) run_discover_careers_spiders   - recruits_url / page_type / post_type 탐색
-      3) run_job_collector_spiders      - 실제 채용공고 수집
-
-    IMPORTANT
-    - chain()에 .s()를 쓰면 이전 task의 return값이 다음 task의 첫 인자로 넘어가서
-      "limit" 파라미터가 의도치 않게 깨질 수 있음.
-    - 따라서 여기서는 전부 .si() (immutable signature)로 고정.
-    """
-    regions_env = os.getenv("COMPANY_REGIONS", "서울특별시,경기도,대전광역시,충청남도,충청북도")
-    regions = [x.strip() for x in regions_env.split(",") if x.strip()]
-    osm_mode = os.getenv("OSM_MODE", "medium")
-    osm_limit = os.getenv("OSM_LIMIT")
-    osm_limit = int(osm_limit) if (osm_limit and osm_limit.isdigit()) else None
-
-    enable_find_missing = os.getenv("ENABLE_FIND_MISSING_HOMEPAGES", "0") == "1"
-
-    logger.info("full_cycle: dispatch chain regions=%s osm_mode=%s", regions, osm_mode)
-
-    tasks = [
-        collect_osm_companies.si(regions=regions, mode=osm_mode, limit=osm_limit),
-    ]
-
-    if enable_find_missing:
-        tasks.append(find_missing_homepages.si())
-
-    tasks.extend([
-        run_discover_careers_spiders.si(),
-        run_job_collector_spiders.si(),
-    ])
-
-    workflow = chain(*tasks)
-    workflow.apply_async()
-
-    logger.info("full_cycle: chain dispatched")
 
 
 @shared_task(name="api.tasks.run_manual_crawl")

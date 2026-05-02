@@ -61,29 +61,6 @@ class CrawlStatusView(APIView):
         return Response({"running": is_running, "status": payload}, status=200)
 
 
-class CrawlTriggerView(APIView):
-    """
-    수동 트리거:
-      - 이미 실행 중(LOCK_KEY 존재)면 409 + 현재 상태 반환
-      - 아니라면 Celery로 전체 사이클 태스크를 디스패치하고 202
-    """
-    permission_classes = [HasInternalAPIToken]
-
-    def post(self, request):
-        # 이미 실행 중이면 409 반환 (네가 쓰던 동작 유지)
-        if r.get(LOCK_KEY):
-            detail = _safe_json_loads(r.get(STATUS_KEY)) or {"state": "BUSY"}
-            return Response({"detail": "already running", "status": detail}, status=409)
-
-        try:
-            # 핵심: 우리 프로젝트의 Celery 앱으로, 기본 큐 "celery"에 태스크 디스패치
-            celery_app.send_task("api.tasks.run_full_crawling_cycle", queue="celery")
-            return Response({"detail": "started"}, status=202)
-        except Exception as e:
-            logger.exception("Manual trigger failed")
-            return Response({"detail": "failed", "error": str(e)}, status=500)
-
-
 class ManualCrawlRunView(APIView):
     permission_classes = [HasInternalAPIToken]
 
