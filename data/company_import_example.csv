@@ -1,0 +1,5 @@
+company_name,homepage_url,recruits_url,page_type,post_type,hiring,region,industry,address,external_job_site
+파이썬랩,https://pythonlab.co.kr,https://pythonlab.co.kr/careers,listing,text,true,서울,소프트웨어,서울 강남구 테헤란로 100,
+주식회사 데이터브릿지,https://www.databridge.ai,https://www.databridge.ai/jobs,one_page,text,yes,경기,AI/데이터,경기도 성남시 분당구 판교역로 200,
+DataBridge Inc,databridge.ai,,one_page,text,true,경기,AI/데이터,경기도 성남시 분당구 판교역로 200,
+알파시스템,,https://alpha.systems/recruit,external,external_link,1,부산,IT서비스,부산 해운대구 센텀로 10,https://www.wanted.co.kr/companies/alpha-systems/jobs
