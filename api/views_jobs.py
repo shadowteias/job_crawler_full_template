@@ -7,6 +7,7 @@ from rest_framework.renderers import JSONRenderer
 
 from api.models import JobPosting
 from api.serializers import JobPostingSerializer
+from api.job_filters import apply_jobseeker_recommendation_active_filter, boolish
 
 
 class JobsPagination(PageNumberPagination):
@@ -20,6 +21,10 @@ class JobPostingListView(ListAPIView):
     읽기 전용 구인공고 목록 API
     - 쿼리:
       * active=1|0 (is_active 필터)
+      * jobseeker_recommendation_active=1|0
+        - 1이면 구직자 추천용 active 기준 적용
+        - 기준: is_active=True AND (deadline_at >= 오늘 OR deadline_at is null)
+        - 같은 날 마감 공고 포함
       * q=검색어 (title/job_description/qualifications/ preferred_qualifications)
       * company=회사명 부분일치
       * region=회사 region 부분일치
@@ -39,6 +44,11 @@ class JobPostingListView(ListAPIView):
             qs = qs.filter(is_active=True)
         elif active in ("0", "false", "False", "f", "no", "n"):
             qs = qs.filter(is_active=False)
+
+        recommendation_active_raw = self.request.query_params.get("jobseeker_recommendation_active")
+        recommendation_active = boolish(recommendation_active_raw, default=(active in ("1", "true", "True", "t", "yes", "y")))
+        if recommendation_active:
+            qs = apply_jobseeker_recommendation_active_filter(qs)
 
         q = self.request.query_params.get("q")
         if q:

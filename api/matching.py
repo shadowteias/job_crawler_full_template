@@ -10,6 +10,7 @@ from django.db.models import Q
 from django.utils.timezone import now
 
 from .models import JobPosting, Company
+from .job_filters import apply_jobseeker_recommendation_active_filter
 
 # ------------ 가중치(요청 표 그대로) ------------
 WEIGHTS = {
@@ -213,8 +214,7 @@ def _score_one(student: dict, job: JobPosting, company: Company | None) -> Tuple
 # ------------ 공개 함수 (동점 안전: tie-breaker 추가) ------------
 def top_jobs_for_student(student: dict, limit: int = 3) -> List[Dict[str, Any]]:
     qs = JobPosting.objects.all()
-    if hasattr(JobPosting, "is_active"):
-        qs = qs.filter(is_active=True)
+    qs = apply_jobseeker_recommendation_active_filter(qs)
     qs = qs.select_related("company").order_by("-id")
 
     heap: List[Tuple[float, int, Dict[str, Any]]] = []
@@ -244,8 +244,7 @@ def top_jobs_for_student(student: dict, limit: int = 3) -> List[Dict[str, Any]]:
 
 def top_students_for_company(company_id: int, students: List[dict], limit: int = 3) -> List[Dict[str, Any]]:
     qs = JobPosting.objects.filter(company_id=company_id)
-    if hasattr(JobPosting, "is_active"):
-        qs = qs.filter(is_active=True)
+    qs = apply_jobseeker_recommendation_active_filter(qs)
     qs = qs.select_related("company")
 
     company = Company.objects.filter(id=company_id).first()
@@ -300,8 +299,7 @@ def batch_match(students: List[dict], company_ids: List[int] | None = None, topk
         qs = JobPosting.objects.filter(company_id__in=company_ids)
     else:
         qs = JobPosting.objects.all()
-    if hasattr(JobPosting, "is_active"):
-        qs = qs.filter(is_active=True)
+    qs = apply_jobseeker_recommendation_active_filter(qs)
     qs = qs.select_related("company").order_by("-id")
 
     result = {"student_top": [], "stats": {"students": len(students), "jobs": qs.count()}}
