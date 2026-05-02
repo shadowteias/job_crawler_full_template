@@ -3,7 +3,6 @@ djangorestframework
 django-cors-headers
 mysqlclient
 whitenoise
-django-celery-beat
 
 scrapy
 mariadb
@@ -19,6 +18,7 @@ pandas
 numpy
 
 requests
+openai
 huggingface-hub
 
 # ML / NLP (zero-shot Korean job classification)

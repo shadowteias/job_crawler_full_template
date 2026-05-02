@@ -14,12 +14,149 @@ from typing import Dict, List, Optional, Tuple
 
 from transformers import AutoTokenizer, AutoModelForSequenceClassification, pipeline
 
+try:
+    from django.conf import settings
+except Exception:  # pragma: no cover - allows standalone parser import in tools/tests
+    settings = None
+
 logger = logging.getLogger(__name__)
 
 JOB_CLASSIFIER_MODEL = os.getenv(
     "JOB_CLASSIFIER_MODEL",
     "joeddav/xlm-roberta-large-xnli"
 )
+
+OPENAI_PARSE_FIELDS = {
+    "job_description",
+    "qualifications",
+    "preferred_qualifications",
+    "hiring_process",
+    "benefits",
+    "location",
+    "employment_type",
+    "salary",
+    "deadline_at",
+    "posted_at",
+}
+
+
+def _setting(name: str, default=None):
+    if settings is not None:
+        return getattr(settings, name, os.getenv(name, default))
+    return os.getenv(name, default)
+
+
+def _openai_api_key() -> str:
+    return str(_setting("OPENAI_API_KEY", "") or "").strip()
+
+
+def _openai_parser_enabled() -> bool:
+    return str(_setting("OPENAI_PARSER_ENABLED", "0") or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _coerce_iso_date(value) -> str:
+    if not value:
+        return ""
+    value = str(value).strip()
+    for fmt in ("%Y-%m-%d", "%Y.%m.%d", "%Y/%m/%d"):
+        try:
+            return datetime.strptime(value[:10], fmt).strftime("%Y-%m-%d")
+        except Exception:
+            continue
+    return ""
+
+
+def _clean_openai_payload(payload: dict) -> dict:
+    cleaned = {}
+    for field in OPENAI_PARSE_FIELDS:
+        value = payload.get(field)
+        if value is None:
+            continue
+        if field in {"deadline_at", "posted_at"}:
+            value = _coerce_iso_date(value)
+        else:
+            value = str(value).strip()
+        if value:
+            cleaned[field] = value
+    return cleaned
+
+
+def _parse_job_details_with_openai(
+    text: str,
+    url: str = "",
+    company_name: str = "",
+    *,
+    api_key: Optional[str] = None,
+    project_id: Optional[str] = None,
+    organization: Optional[str] = None,
+    model: Optional[str] = None,
+    parser_enabled: Optional[bool] = None,
+) -> dict:
+    parser_is_enabled = _openai_parser_enabled() if parser_enabled is None else parser_enabled
+    if not parser_is_enabled:
+        return {}
+
+    effective_api_key = (api_key or _openai_api_key()).strip()
+    if not effective_api_key:
+        logger.warning("OPENAI_PARSER_ENABLED is true but OPENAI_API_KEY is not configured; using fallback parser")
+        return {}
+
+    try:
+        from openai import OpenAI
+    except Exception as e:
+        logger.warning("OpenAI parser requested but openai package is unavailable: %s", e)
+        return {}
+
+    effective_model = str(model or _setting("OPENAI_MODEL", "gpt-4o-mini") or "gpt-4o-mini")
+    timeout = float(_setting("OPENAI_TIMEOUT_SECONDS", 30) or 30)
+    max_retries = int(_setting("OPENAI_MAX_RETRIES", 2) or 2)
+    project = str(project_id or _setting("OPENAI_PROJECT_ID", _setting("OPENAI_PROJECT", "")) or "").strip() or None
+    effective_organization = str(organization or _setting("OPENAI_ORGANIZATION", "") or "").strip() or None
+
+    client = OpenAI(
+        api_key=effective_api_key,
+        project=project,
+        organization=effective_organization,
+        timeout=timeout,
+        max_retries=max_retries,
+    )
+
+    prompt = {
+        "task": "Extract structured job posting fields from a Korean or English company recruiting page.",
+        "rules": [
+            "Return JSON only.",
+            "Use empty strings for unknown fields.",
+            "Do not invent requirements, benefits, dates, salary, or location.",
+            "Dates must be YYYY-MM-DD when present.",
+            "If the page is not a job posting, return an empty JSON object.",
+        ],
+        "fields": sorted(OPENAI_PARSE_FIELDS),
+        "company_name": company_name,
+        "url": url,
+        "text": text[:12000],
+    }
+
+    response = client.chat.completions.create(
+        model=effective_model,
+        messages=[
+            {
+                "role": "system",
+                "content": "You are a precise recruiting-page parser. Return compact JSON only.",
+            },
+            {
+                "role": "user",
+                "content": json.dumps(prompt, ensure_ascii=False),
+            },
+        ],
+        response_format={"type": "json_object"},
+        temperature=0,
+    )
+
+    content = response.choices[0].message.content or "{}"
+    parsed = json.loads(content)
+    if not isinstance(parsed, dict):
+        return {}
+    return _clean_openai_payload(parsed)
 
 # SECTION LABELS (Korean + English only)
 SECTION_LABELS = [
@@ -100,7 +237,7 @@ EMPLOYMENT_TYPE_KEYWORDS = {
 }
 
 
-def _parse_date(year_str: str, month_str: str, day_str: str) -> datetime:
+def _parse_date(year_str: str, month_str: str, day_str: str) -> Optional[datetime]:
     try:
         year = int(year_str)
         month = int(month_str)
@@ -327,8 +464,8 @@ def parse_job_details_with_llm(
     text: str,
     url: str = "",
     company_name: str = "",
-    sections: dict = None,
-    primary_text: str = None
+    sections: Optional[dict] = None,
+    primary_text: Optional[str] = None
 ) -> dict:
     if not text or len(text) < 100:
         return {}
@@ -337,13 +474,20 @@ def parse_job_details_with_llm(
 
     text_combined = ' '.join(text.split())
 
+    try:
+        openai_result = _parse_job_details_with_openai(text_combined, url=url, company_name=company_name)
+        result.update(openai_result)
+    except Exception as e:
+        logger.warning("OpenAI job parser failed for url=%s (%s); using fallback parser", url, e)
+
     deadline_at, posted_at = extract_posting_dates(text)
-    if deadline_at:
+    if deadline_at and "deadline_at" not in result:
         result["deadline_at"] = deadline_at.strftime("%Y-%m-%d")
-    if posted_at:
+    if posted_at and "posted_at" not in result:
         result["posted_at"] = posted_at.strftime("%Y-%m-%d")
 
-    result["salary"] = _extract_salary(text)
+    if "salary" not in result:
+        result["salary"] = _extract_salary(text)
 
     zero_shot_sections = _classify_sections_with_zero_shot(text)
     for key, value in zero_shot_sections.items():
@@ -399,8 +543,11 @@ def parse_job_details_with_llm(
         else:
             result['preferred_qualifications'] = pref[:2000]
 
-    result['benefits'] = _normalize_welfare(text)
-    result['location'] = _normalize_location(text)
-    result['employment_type'] = _normalize_employment_type(text)
+    if "benefits" not in result:
+        result['benefits'] = _normalize_welfare(text)
+    if "location" not in result:
+        result['location'] = _normalize_location(text)
+    if "employment_type" not in result:
+        result['employment_type'] = _normalize_employment_type(text)
 
     return result
