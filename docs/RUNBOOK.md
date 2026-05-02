@@ -18,11 +18,10 @@ docker compose ps
 로그 보기
 docker compose logs -f app --tail=200
 docker compose logs -f worker --tail=200
-docker compose logs -f beat --tail=200
 
 
 .env 변경 반영(키 누락 방지)
-docker compose up -d --force-recreate worker beat
+docker compose up -d --force-recreate worker
 
 2. 마이그레이션
 docker compose exec app python manage.py makemigrations
@@ -33,10 +32,6 @@ docker compose exec app python manage.py migrate
 API/관리:
 
 http://localhost:8200/admin/
-
-스케줄 확인:
-
-http://localhost:8200/admin/django_celery_beat/periodictask/
 
 4. “지금 동작이 끝났나?” 확인
 Celery worker 상태
@@ -80,17 +75,7 @@ limit=None 또는 큰 값으로 chunk 처리하는 정책을 사용.
 
 사양 낮은 노트북에서는 비추천.
 
-7. 스케줄(주기 작업) 등록/갱신
-코드 기반 스케줄 업서트(있다면)
-docker compose exec app python manage.py shell -c "from api.tasks import setup_company_seed_schedules; setup_company_seed_schedules.delay(); print('queued')"
-
-스케줄이 제대로 들어갔는지
-
-Admin 페이지에서 PeriodicTask 목록 확인.
-
-task name / crontab / kwargs 확인.
-
-8. DB 초기화/재시딩(주의)
+7. DB 초기화/재시딩(주의)
 
 운영에서 함부로 하지 말 것.
 
@@ -102,19 +87,19 @@ docker compose exec app python manage.py migrate
 방법 B: Company만 비우기(관계 모델 주의)
 docker compose exec app python manage.py shell -c "from api.models import Company; Company.objects.all().delete(); print('deleted')"
 
-9. 트러블슈팅 빠른 체크
+8. 트러블슈팅 빠른 체크
 
 worker가 아무 로그도 안 찍는다
 
 celery inspect active/reserved로 실제 큐 소비 중인지 확인.
 
-.env 수정 후 worker/beat 재생성 필요할 수 있음.
+.env 수정 후 worker 재생성 필요할 수 있음.
 
 DART 키 missing
 
 .env에 OPENDART_API_KEY 확인.
 
---force-recreate worker beat.
+--force-recreate worker.
 
 Windows에서 shell -c 명령이 SyntaxError
 

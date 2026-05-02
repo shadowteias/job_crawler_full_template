@@ -19,7 +19,6 @@ services:
         required: true
     environment:
       API_INTERNAL_TOKEN: internal_token_8h_7Kifc0r
-      CRAWL_INTERVAL_HOURS: "8"
       DB_HOST: db
       DB_NAME: job_data
       DB_PASSWORD: uR7!fP9v@L3xA2qT#e6K
@@ -42,50 +41,6 @@ services:
         target: 8000
         published: "8000"
         protocol: tcp
-    volumes:
-      - type: bind
-        source: C:\Users\teias\Downloads\job_crawler_full_template
-        target: /app
-        bind:
-          create_host_path: true
-  beat:
-    build:
-      context: C:\Users\teias\Downloads\job_crawler_full_template
-      dockerfile: Dockerfile
-    command:
-      - celery
-      - -A
-      - config
-      - beat
-      - -l
-      - info
-      - --scheduler
-      - django_celery_beat.schedulers:DatabaseScheduler
-    container_name: job_crawler_beat
-    depends_on:
-      app:
-        condition: service_started
-        required: true
-      redis:
-        condition: service_healthy
-        required: true
-    environment:
-      API_INTERNAL_TOKEN: internal_token_8h_7Kifc0r
-      CRAWL_INTERVAL_HOURS: "8"
-      DB_HOST: db
-      DB_NAME: job_data
-      DB_PASSWORD: uR7!fP9v@L3xA2qT#e6K
-      DB_PORT: "3306"
-      DB_PUBLISHED_PORT: "3308"
-      DB_ROOT_PASSWORD: R0ot!2025^maria#K8pS
-      DB_USER: user
-      DJANGO_ALLOWED_HOSTS: localhost,127.0.0.1,api
-      DJANGO_DEBUG: "True"
-      DJANGO_SECRET_KEY: g1yQ9!JtK@7pW3zX5n^Ar8F%L2uR0cVh6S#MdE4bBk!qUy*PZ
-      REDIS_URL: redis://redis:6379/0
-      TZ: Asia/Seoul
-    networks:
-      internal_net: {}
     volumes:
       - type: bind
         source: C:\Users\teias\Downloads\job_crawler_full_template
@@ -163,7 +118,6 @@ services:
         required: true
     environment:
       API_INTERNAL_TOKEN: internal_token_8h_7Kifc0r
-      CRAWL_INTERVAL_HOURS: "8"
       DB_HOST: db
       DB_NAME: job_data
       DB_PASSWORD: uR7!fP9v@L3xA2qT#e6K

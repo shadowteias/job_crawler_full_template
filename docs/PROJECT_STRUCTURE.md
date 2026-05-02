@@ -130,7 +130,6 @@ lms_tp/
 | `find_missing_homepages()` | homepage_url이 빈 회사 검색 |
 | `run_discover_careers_spiders()` | 각 회사별 채용 페이지 탐색 실행 |
 | `run_job_collector_spiders()` | 채용 공고 수집 실행 |
-| `run_full_crawling_cycle()` | 전체 파이프라인 실행 |
 | `collect_swdb_companies()` | SWDB CSV에서 회사 수집 |
 | `collect_dart_companies()` | DART API에서 상장사 수집 |
 | `check_company_homepages()` | homepage_url 상태 체크 |
@@ -216,7 +215,7 @@ lms_tp/
 |------------|--------|------|
 | `/api/job-postings/` | GET | 채용 공고 목록 (ReadOnly) |
 | `/api/job-postings/{id}/` | GET | 개별 공고 상세 |
-| `/api/crawl/trigger/` | POST | 크롤링 수동 트리거 |
+| `/api/crawl/run/` | POST | 수동 크롤링 실행 |
 | `/api/crawl/status/` | GET | 크롤링 상태 조회 |
 | `/api/jobs/` | GET | 채용 공고 필터링 |
 | `/api/match/student-top/` | POST | 학생별 매칭 |
@@ -240,13 +239,12 @@ docker compose up -d
 # 로그 확인
 docker compose logs -f app        # Django 앱 로그
 docker compose logs -f worker     # Celery 워커 로그
-docker compose logs -f beat       # Celery 비트 로그
 
 # 컨테이너 상태 확인
 docker compose ps
 
 # 재시작
-docker compose restart app worker beat
+docker compose restart app worker
 ```
 
 ### 4.2 Django Management Commands
@@ -266,12 +264,11 @@ docker compose exec app python manage.py shell
 ### 4.3 Celery 태스크 실행
 
 ```bash
-# 전체 크롤링 파이프라인 (수동 트리거)
-docker compose exec app python manage.py shell -c "
-from api.tasks import run_full_crawling_cycle
-run_full_crawling_cycle.delay()
-print('queued')
-"
+# 수동 크롤링 API 호출
+curl -X POST "http://localhost:8200/api/crawl/run/" \
+  -H "Content-Type: application/json" \
+  -H "X-Internal-Token: internal_token_8h_7Kifc0r" \
+  -d '{"company_id_start":1,"company_id_end":10,"workers":2,"run_homepage_check":true,"run_discover":true,"run_collect":true}'
 
 # OSM 회사 수집
 docker compose exec app python manage.py shell -c "
@@ -378,52 +375,23 @@ docker compose exec app python -m unittest tests.test_spiders -v
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
-│                     run_full_crawling_cycle()                        │
+│                        run_manual_crawl()                            │
 └──────────────────────────────────────────────────────────────────────┘
                                    │
-         ┌─────────────────────────┼─────────────────────────┐
-         ▼                         ▼                         ▼
-┌─────────────────┐    ┌─────────────────────┐    ┌─────────────────────┐
-│  OSM 수집       │    │  Homepage 체크       │    │  SWDB/DART (주기)   │
-│ collect_osm_    │    │  check_company_     │    │  collect_swdb_/     │
-│ companies       │    │  homepages          │    │  collect_dart_      │
-└─────────────────┘    └─────────────────────┘    └─────────────────────┘
-         │                         │                         │
-         └─────────────────────────┼─────────────────────────┘
+                    ┌──────────────┼──────────────┐
+                    ▼              ▼              ▼
+           ┌──────────────┐ ┌──────────────┐ ┌──────────────┐
+           │ homepage     │ │ discover     │ │ collect      │
+           │ check        │ │ careers      │ │ job postings │
+           └──────────────┘ └──────────────┘ └──────────────┘
+                    │              │              │
+                    └──────────────┼──────────────┘
                                    ▼
                     ┌─────────────────────────────┐
-                    │  Company (homepage_url)    │
-                    │  - alive 상태 필터링        │
-                    └─────────────────────────────┘
-                                   │
-                                   ▼
-                    ┌─────────────────────────────┐
-                    │  discover_careers spiders  │
-                    │  - recruits_url 탐색        │
-                    │  - page_type 판정           │
-                    │  - post_type 판정           │
-                    └─────────────────────────────┘
-                                   │
-                                   ▼
-                    ┌─────────────────────────────┐
-                    │  Company ( recruits_url)   │
-                    │  + page_type               │
-                    │  + post_type               │
-                    └─────────────────────────────┘
-                                   │
-                                   ▼
-                    ┌─────────────────────────────┐
-                    │  job_collector spiders      │
-                    │  - JobPostings 생성/업데이트│
-                    │  - 텍스트 추출              │
-                    │  - 섹션 파싱                │
-                    └─────────────────────────────┘
-                                   │
-                                   ▼
-                    ┌─────────────────────────────┐
-                    │  JobPosting (is_active)    │
-                    │  - title, job_description  │
-                    │  - qualifications, etc     │
+                    │  Company / JobPosting DB    │
+                    │  - alive 상태 반영           │
+                    │  - recruits_url/page_type    │
+                    │  - JobPosting upsert         │
                     └─────────────────────────────┘
 ```
 
@@ -494,9 +462,6 @@ REDIS_URL=redis://redis:6379/0
 DJANGO_SECRET_KEY=your_secret_key
 DJANGO_DEBUG=True
 DJANGO_ALLOWED_HOSTS=*
-
-# Celery
-CRAWL_INTERVAL_HOURS=8
 
 # API
 API_INTERNAL_TOKEN=internal_token_8h_7Kifc0r

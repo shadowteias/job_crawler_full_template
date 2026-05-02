@@ -163,7 +163,6 @@ Main exposed API endpoints:
 - `GET /api/job-postings/{id}/`
 - `GET /api/jobs`
 - `GET /api/crawl/status/`
-- `POST /api/crawl/trigger/`  ← legacy-ish full-cycle trigger
 - `POST /api/crawl/run/`      ← preferred manual crawl API
 - `POST /api/match/student-top`
 - `POST /api/match/company-top`
@@ -256,26 +255,7 @@ Needed outcome:
 - a narrower `recommendable` subset,
 - based on currentness + page quality + parsing confidence.
 
-## 2. Legacy / periodic cleanup
-
-Still present and should be reviewed:
-- `api/management/commands/setup_periodic_tasks.py`
-- `api/management/commands/init_schedule.py`
-- `api.company_sources.setup_company_seed_schedules()`
-- old docs that assume beat-first crawling
-
-## 3. API surface simplification
-
-Need to decide what to do with:
-- `POST /api/crawl/trigger/`
-
-Because now both exist:
-- legacy full-cycle trigger
-- new manual stage-selective trigger
-
-The project would be cleaner with one clearly preferred operational API.
-
-## 4. Final documentation cleanup
+## 2. Final documentation cleanup
 
 Old task names still appear in some docs and should be normalized.
 

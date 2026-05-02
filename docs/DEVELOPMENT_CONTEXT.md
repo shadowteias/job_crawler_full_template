@@ -203,11 +203,11 @@ docker compose exec app python manage.py shell
 ### 8.2 빠른 시작
 
 ```bash
-# 전체 크롤링 파이프라인
-docker compose exec app python manage.py shell -c "
-from api.tasks import run_full_crawling_cycle
-run_full_crawling_cycle.delay()
-"
+# 수동 크롤링 실행
+curl -X POST "http://localhost:8200/api/crawl/run/" \
+  -H "Content-Type: application/json" \
+  -H "X-Internal-Token: internal_token_8h_7Kifc0r" \
+  -d '{"company_id_start":1,"company_id_end":20,"workers":2,"run_homepage_check":true,"run_discover":true,"run_collect":true}'
 
 # CSV 내보내기
 docker compose exec app python manage.py export_companies_to_csv --output /app/data/companies_latest.csv

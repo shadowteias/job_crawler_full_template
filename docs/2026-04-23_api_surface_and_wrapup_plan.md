@@ -39,12 +39,6 @@
 - 인증: `X-Internal-Token`
 - 목적: 현재 크롤링 실행 여부 / 상태 확인
 
-#### `POST /api/crawl/trigger/`
-- backing: `api.views.CrawlTriggerView`
-- 인증: `X-Internal-Token`
-- 목적: 기존 full-cycle 트리거
-- 성격: legacy 성격이 강함
-
 #### `POST /api/crawl/run/` ✅ 이번 추가
 - backing: `api.views.ManualCrawlRunView`
 - 인증: `X-Internal-Token`
@@ -103,14 +97,12 @@
 - `run_discover_careers_spiders_concurrent`
 - `run_job_collector_spiders`
 - `run_job_collector_spiders_concurrent`
-- `run_full_crawling_cycle`
 - `run_manual_crawl`
 
 ### 회사 소스 / 운영 task
 - `collect_swdb_companies`
 - `collect_dart_companies`
 - `check_company_homepages`
-- `setup_company_seed_schedules`
 
 ### 운영 command
 - `rerun_company_crawl_range`
@@ -119,8 +111,6 @@
 - `import_job_postings_from_csv`
 - `import_trainees`
 - `seed_companies_from_csv`
-- `setup_periodic_tasks`
-- `init_schedule`
 - `run_validation_random_batches`
 
 ---
@@ -158,25 +148,7 @@
 
 ## 미진하거나 더 다듬어야 할 부분
 
-### 1. crawl API 이원화
-
-현재 crawl 제어는 두 가지 방식이 공존한다.
-
-- `POST /api/crawl/trigger/`
-- `POST /api/crawl/run/`
-
-앞으로는 `crawl/run/`를 표준 수동 실행 API로 삼고,
-`crawl/trigger/`는 legacy 처리하거나 제거 여부를 정하는 것이 좋다.
-
-### 2. periodic scheduling 흔적 정리 필요
-
-비주기/수동 실행 방향으로 바꾸려면 아래는 정리 대상이다.
-
-- `setup_periodic_tasks.py`
-- `init_schedule.py`
-- `setup_company_seed_schedules()`
-
-### 3. 문서상 오래된 task 이름
+### 1. 문서상 오래된 task 이름
 
 일부 문서에는 아래 같은 오래된 task 이름이 남아 있다.
 
@@ -212,10 +184,8 @@ generic HR / 인재채용 안내 페이지 false positive는 여전히 일부 �
 ## 정리 후보 / cleanup 대상
 
 ### 즉시 정리 후보
-1. `POST /api/crawl/trigger/`의 역할 축소 또는 제거
-2. `hello` task (`api.tasks.hello`) 제거
-3. periodic scheduling scaffold 정리
-4. 오래된 docs task 이름 정리
+1. `hello` task (`api.tasks.hello`) 제거
+2. 오래된 docs task 이름 정리
 
 ### 유지하되 문서화가 필요한 것
 1. 날짜 유효성 규칙
@@ -229,12 +199,10 @@ generic HR / 인재채용 안내 페이지 false positive는 여전히 일부 �
 ## 마무리 단계 계획
 
 ### 1단계: API surface 확정
-- `crawl/run/`를 표준 수동 crawl API로 확정
-- `crawl/trigger/` 정리 방향 결정
+- `crawl/run/`를 표준 수동 crawl API로 유지
 - API 문서 최신화
 
 ### 2단계: stale/legacy 정리
-- periodic schedule 관련 코드/문서 정리
 - old task name 정리
 - 실험 잔재 코드 제거
 

@@ -72,12 +72,10 @@ This is the branch that currently contains the cleaner, main-based integration w
 ### Main implementation files
 - `api/tasks.py`
   - `collect_osm_companies()`
-  - `run_full_crawling_cycle()`
 - `api/company_sources.py`
   - `collect_swdb_companies()`
   - `collect_dart_companies()`
   - `check_company_homepages()`
-  - `setup_company_seed_schedules()`
 
 ### Related commands
 - `api/management/commands/import_companies_from_csv.py`
@@ -354,7 +352,6 @@ Otherwise it should not remain active.
 - `GET /api/job-postings/{id}/`
 - `GET /api/jobs`
 - `GET /api/crawl/status/`
-- `POST /api/crawl/trigger/`
 - `POST /api/crawl/run/`
 - `POST /api/match/student-top`
 - `POST /api/match/company-top`
@@ -392,26 +389,7 @@ Matching APIs exist, but the crawl-side trust work has received much more experi
 
 It has been wired and responded correctly, but it still deserves more real-world operational use.
 
-## 5. Some stale periodic assumptions still remain in the repo
-
-Even though the project direction is moving toward manual/non-periodic execution, there are still remnants of periodic scheduling logic and docs.
-
----
-
-## Likely Cleanup Targets
-
-## Operational direction cleanup
-- `POST /api/crawl/trigger/`
-  - decide whether to keep as legacy full-cycle trigger or deprecate it in favor of `crawl/run/`
-
-## Periodic scheduling remnants
-- `api/management/commands/setup_periodic_tasks.py`
-- `api/management/commands/init_schedule.py`
-- `api.company_sources.setup_company_seed_schedules()`
-
-These may remain useful operationally, but they conflict conceptually with a manual-only direction and should be reviewed.
-
-## Old docs names and assumptions
+## 5. Old docs names and assumptions
 - older task names still survive in some docs
 - older periodic assumptions should be cleaned up so the code/docs story is consistent
 
@@ -444,14 +422,12 @@ What remains is less about inventing core features and more about:
 ## Suggested Wrap-up Plan
 
 ## Phase 1 — API surface stabilization
-- Decide whether `crawl/trigger/` remains or becomes legacy-only
 - Keep `crawl/run/` as the primary manual execution API
 - Document all API payloads and auth expectations clearly
 
-## Phase 2 — Cleanup of stale/legacy periodic assumptions
-- review periodic scheduling code and docs
-- keep only what is intentionally still used
-- remove or mark deprecated anything that no longer matches the intended operation model
+## Phase 2 — Cleanup of stale/legacy assumptions
+- review docs and runtime guidance for manual execution only
+- remove outdated operational assumptions that no longer match the intended model
 
 ## Phase 3 — Recommendation trust layer
 - define a high-trust subset of active postings

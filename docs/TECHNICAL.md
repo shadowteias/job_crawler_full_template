@@ -19,7 +19,7 @@
 ### 2) 채용 수집 파이프라인
 - 회사 홈페이지 → 채용 페이지 탐색(discover) → 공고 수집(collector).
 - 비동기 실행은 Celery로 한다.
-- 운영은 django-celery-beat로 스케줄링한다.
+- 운영은 수동 실행(`POST /api/crawl/run/` 또는 명령 기반) 중심이다.
 
 ### 3) 홈페이지 생존 체크(dead 처리)
 - 회사 homepage_url이 죽었는지 주기적으로 체크한다.
@@ -32,7 +32,6 @@
 - Backend: Django + DRF
 - Queue: Celery + Redis
 - DB: MariaDB 10.5
-- Scheduler UI: Django Admin + django-celery-beat
 - Crawling: Scrapy(스파이더는 별도 프로세스로 실행)
 
 ---
@@ -50,9 +49,6 @@
   - `volumes: .:/app` 로 로컬 코드가 컨테이너에 반영된다.
 - `worker`
   - Celery worker.
-- `beat`
-  - Celery beat.
-  - Scheduler는 `django_celery_beat.schedulers:DatabaseScheduler`.
 
 ### 네트워크
 - `internal_net`: 내부 전용
@@ -66,8 +62,8 @@
   - `config/celery.py`에서 Celery autodiscover + imports 설정.
 - `api/`
   - `models.py`: Company/JobPosting 등 모델.
-  - `tasks.py`: “크롤링 파이프라인” task(홈페이지 찾기/스파이더 실행/전체 체인).
-  - `company_sources.py`: “회사 시드 수집” task(OSM/SWDB/DART) + upsert 로직 + 스케줄 등록 + 홈페이지 dead 체크(구현 위치는 프로젝트 기준으로 확인).
+  - `tasks.py`: “크롤링 파이프라인” task(홈페이지 찾기/스파이더 실행/수동 실행 경로).
+  - `company_sources.py`: “회사 시드 수집” task(OSM/SWDB/DART) + upsert 로직 + 홈페이지 dead 체크.
   - `utils.py`: 홈페이지 검색 보조(예: `find_homepage_for_company`).
 - `crawler/`
   - Scrapy 프로젝트(스파이더들: discover_careers, job_collector 등)
@@ -145,28 +141,15 @@
 3) `run_job_collector_spiders`
 - recruits_url + page_type/post_type 기반으로 Scrapy `job_collector` 실행.
 - 외부 플랫폼(external)은 제외(정책에 따라 변경 가능).
-4) `run_full_crawling_cycle`
-- 위 3개를 Celery chain으로 묶어 한 번에 실행.
+4) `run_manual_crawl`
+- 수동 실행 파이프라인.
+- `company_id_start/company_id_end`, 단계별 on/off, worker 수를 제어한다.
 
 ---
 
-## 8. 스케줄링(django-celery-beat)
-- 실제 실행 주기는 Django Admin에서 관리한다.
-- 현재 등록된 스케줄은 보통 아래가 포함된다(환경마다 이름이 조금 다를 수 있음).
-  - OSM 주 1회
-  - DART 주 1회(변경분 중심 since_days=14)
-  - SWDB 연 1회(2월 1일 등)
-  - homepage dead 체크 연 1회(또는 필요 시)
-  - full crawling 8시간(운영 부하 보고 조정)
-
-확인은 여기서 한다.
-- `/admin/django_celery_beat/periodictask/`
-
----
-
-## 9. 환경변수(.env) 핵심
-- 모든 컨테이너(app/worker/beat)에 `.env`가 주입된다(`docker-compose.yml`의 `env_file`).
-- 키 수정 후에는 worker/beat를 재시작(필요 시 force-recreate)해야 반영되는 경우가 있다.
+## 8. 환경변수(.env) 핵심
+- 모든 컨테이너(app/worker)에 `.env`가 주입된다(`docker-compose.yml`의 `env_file`).
+- 키 수정 후에는 worker를 재시작(필요 시 force-recreate)해야 반영되는 경우가 있다.
 
 ### 내부 API 인증 헤더
 - 내부 관리/운영성 API는 `X-Internal-Token` 을 기준 헤더로 사용한다.
@@ -184,9 +167,25 @@
   - `SWDB_CSV_PATH=/app/data/swdb_seed.csv`
   - 그리고 `./data/swdb_seed.csv`를 레포에 두고 `volumes: .:/app`로 컨테이너에서 읽게 한다.
 
+### GPT/OpenAI 기반 구인공고 파서(선택)
+- `api/llm_parser.py`는 `OPENAI_PARSER_ENABLED=1`이고 `OPENAI_API_KEY`가 있을 때만 OpenAI 파서를 먼저 사용한다.
+- GPT 응답에서 받은 `job_description`, `qualifications`, `preferred_qualifications`, `hiring_process`, `benefits`, `location`, `employment_type`, `salary`, `deadline_at`, `posted_at`을 정리한 뒤 기존 룰/제로샷 fallback으로 비어 있는 값을 보완한다.
+- 개발 테스트는 개발용 OpenAI 계정/key/project를 `.env` 또는 secret에 넣고 app/worker를 재시작한다.
+- 실서비스는 같은 변수명에 production key/project를 배포 secret으로 주입한다. 개발/운영 key를 동시에 같은 컨테이너에 넣지 않는다.
+- 지원 변수:
+  - `OPENAI_PARSER_ENABLED=0|1`
+  - `OPENAI_API_KEY`
+  - `OPENAI_PROJECT_ID` (권장; 선택)
+  - `OPENAI_PROJECT` (legacy alias; 선택)
+  - `OPENAI_ORGANIZATION`
+  - `OPENAI_MODEL` (기본 `gpt-4o-mini`)
+  - `OPENAI_TIMEOUT_SECONDS` (기본 `30`)
+  - `OPENAI_MAX_RETRIES` (기본 `2`)
+- 실제 키는 git, 문서, 로그에 남기지 않는다.
+
 ---
 
-## 10. 운영 확인(최소 체크)
+## 9. 운영 확인(최소 체크)
 - worker가 task를 등록했는지:
   - `docker compose logs -f worker --tail=200`
   - worker 시작 로그에 `[tasks]` 목록이 찍힌다.
@@ -196,16 +195,19 @@
   - `python manage.py shell -c "from api.models import Company; print(Company.objects.exclude(stock_code__isnull=True).exclude(stock_code='').count())"`
 - 특정 회사 ID 범위만 부분 실행할 때:
   - `check_company_homepages`, `find_missing_homepages`, `run_discover_careers_spiders`, `run_job_collector_spiders` 는 `company_id_start`, `company_id_end` 인자를 받을 수 있다.
-  - 운영 기본 스케줄은 기존처럼 전체/limit 기준으로 동작하므로 주기 실행 동작은 그대로 유지된다.
+  - 수동 운영 기준으로 작은 범위를 먼저 실행해 검증하는 것이 안전하다.
+- 브라우저 테스트 페이지:
+  - `http://localhost:8200/api-test/`
+  - 내부 토큰을 입력해 `/api/crawl/status/`, `/api/jobs`, `/api/job-postings/`, `/api/normalize/counseling`, `/api/match/*`, `/api/crawl/run/`을 확인한다.
 
 ---
 
-## 11. 자주 발생한 이슈/해결
+## 10. 자주 발생한 이슈/해결
 ### 1) OPENDART_API_KEY missing
 - 원인
   - .env 수정 후 worker 컨테이너가 재생성/재시작되지 않아 환경변수가 반영되지 않음.
 - 해결
-  - `docker compose up -d --force-recreate worker beat`
+  - `docker compose up -d --force-recreate worker`
 
 ### 2) Nominatim 403
 - 원인
@@ -248,6 +250,6 @@
   - `api/company_sources.py`의 SWDB record 파싱 구간(홈페이지 문자열 정리)
 - DART 신규생성/보강 범위 바꾸기
   - `collect_dart_companies(mode=...)`
-- 스케줄 변경
-  - Admin에서 PeriodicTask 수정
-  - 또는 `setup_company_seed_schedules()` 로직 수정 후 재실행
+- 수동 실행 경로 변경
+  - `api/views.py`의 `ManualCrawlRunView`
+  - `api/tasks.py`의 `run_manual_crawl`

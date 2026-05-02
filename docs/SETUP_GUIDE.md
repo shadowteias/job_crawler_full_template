@@ -63,11 +63,22 @@ DJANGO_SECRET_KEY=your_secret_key_here_change_in_production
 DJANGO_DEBUG=True
 DJANGO_ALLOWED_HOSTS=*
 
-# Celery
-CRAWL_INTERVAL_HOURS=8
-
 # API
 API_INTERNAL_TOKEN=internal_token_8h_7Kifc0r
+
+# Optional GPT parser for job-posting extraction.
+# 개발 테스트: 개발용 GPT/OpenAI 계정 키와 프로젝트를 넣는다.
+# 실서비스: 배포 환경에서 별도 production key/project를 주입한다.
+OPENAI_PARSER_ENABLED=0
+OPENAI_API_KEY=
+# Optional OpenAI Platform project id. Blank is OK for first smoke test.
+OPENAI_PROJECT_ID=
+# Legacy alias; prefer OPENAI_PROJECT_ID for new setups.
+OPENAI_PROJECT=
+OPENAI_ORGANIZATION=
+OPENAI_MODEL=gpt-4o-mini
+OPENAI_TIMEOUT_SECONDS=30
+OPENAI_MAX_RETRIES=2
 
 # (선택) DART API - 금융감독원 데이터 수집 시
 # OPENDART_API_KEY=your_api_key_here
@@ -117,14 +128,13 @@ docker compose logs -f app
 # Celery 워커 로그
 docker compose logs -f worker
 
-# Celery Beat 로그
-docker compose logs -f beat
 ```
 
 ### 6.2 API 접근
 
-- **Django**: http://localhost:8000
-- **API 테스트**: http://localhost:8000/api/job-postings/?limit=10
+- **Django**: http://localhost:8200
+- **API 테스트 페이지**: http://localhost:8200/api-test/ (`API_INTERNAL_TOKEN` 자동 첨부, 예시 payload 포함)
+- **JSON API 직접 확인**: http://localhost:8200/api/job-postings/?limit=10
 
 ### 6.3 Celery 워커 상태 확인
 
@@ -136,14 +146,21 @@ docker compose exec worker celery -A config inspect ping
 
 ## 7. 주요 작업
 
-### 7.1 전체 크롤링 파이프라인 실행
+### 7.1 수동 크롤링 파이프라인 실행
 
 ```bash
-docker compose exec app python manage.py shell -c "
-from api.tasks import run_full_crawling_cycle
-run_full_crawling_cycle.delay()
-print('Task queued')
-"
+curl -X POST "http://localhost:8200/api/crawl/run/" \
+  -H "Content-Type: application/json" \
+  -H "X-Internal-Token: internal_token_8h_7Kifc0r" \
+  -d '{
+    "company_id_start": 1,
+    "company_id_end": 50,
+    "workers": 2,
+    "run_homepage_check": true,
+    "run_discover": true,
+    "run_collect": true,
+    "force_homepage_recheck": false
+  }'
 ```
 
 ### 7.2 개별 작업 실행
@@ -190,6 +207,22 @@ with open('/app/data/job_postings_latest.csv', 'w', newline='', encoding='utf-8'
 print('Exported')
 "
 ```
+
+### 7.4 GPT 파서 개발/운영 계정 전환
+
+구인페이지 분석(`api/llm_parser.py`)은 기본적으로 로컬/룰 기반 fallback으로 동작한다. GPT 기반 구조화 추출을 테스트할 때만 아래처럼 개발 계정 값을 주입한다.
+
+```bash
+OPENAI_PARSER_ENABLED=1
+OPENAI_API_KEY=개발용_OpenAI_API_Key
+OPENAI_PROJECT_ID=개발용_Project_ID_또는_빈값
+OPENAI_PROJECT=
+OPENAI_MODEL=gpt-4o-mini
+OPENAI_TIMEOUT_SECONDS=30
+OPENAI_MAX_RETRIES=2
+```
+
+ChatGPT Plus 구독만으로는 서버 API 호출이 되지 않는다. OpenAI Platform에서 API key를 발급해야 하며, `OPENAI_PROJECT_ID`는 project를 분리해서 관리할 때만 넣는다. 운영 전환 시에는 코드 변경 없이 같은 변수명에 실서비스용 key/project를 배포 secret으로 주입한다. 개발/운영 키를 동시에 같은 프로세스에 넣지 말고, 실제 키는 `.env.example`, 문서, git commit, 로그에 남기지 않는다. 키 변경 후에는 `docker compose up -d --force-recreate app worker`로 app/worker에 새 환경변수를 반영한다.
 
 ---
 
